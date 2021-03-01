@@ -122,3 +122,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# PyCharm IDE and other not-for-git stuff:
+.idea/
+.gitignore
+*.fts

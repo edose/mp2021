@@ -1,0 +1,42 @@
+[Limits]
+Min MP Altitude         = float -> min mp altitude
+Min Moon Distance       = float -> min moon distance
+Min Hours MP Observable = float -> min hours mp observable
+Max V Magnitude         = float -> max v magnitude
+
+[Mount]
+Model = string -> mount model
+
+[OTA]
+Model    = string -> ota model
+Aperture = float  -> aperture
+
+[Camera]
+Model          = string -> camera model
+X Pixels       = int    -> x pixels
+Y Pixels       = int    -> y pixels
+# Gain is in electrons/ADU.
+CCD Gain       = float  -> ccd gain
+Saturation ADU = int    -> saturation adu
+Max Vignetting Pct At Corner = float -> max vignetting pct at corner
+
+[Plate Solution]
+Pinpoint Pixel Scale Multiplier = float -> pinpoint pixel scale multiplier
+
+[Filters]
+Available       = string -> available filters
+# Mag Exposures = Filter v_mag secs, v_mag secs, ...
+Mag Exposures   = string list -> mag exposures
+# Transforms    = Filter Passband CI_pb1 CI_pb2 1st-order_tr [2nd-order tr] # one only per line
+Transforms            = string list -> transforms
+Default Color Filters = string -> default color filters
+Default Color Index   = string -> default color index
+
+[Scale]
+Min FWHM Pixels = float -> min fwhm pixels
+Max FWHM Pixels = float -> max fwhm pixels
+Nominal FWHM Pixels = float -> nominal fwhm pixels
+
+[Timing]
+Exposure Overhead       = float -> exposure overhead
+Max Exposure No Guiding = float -> max exposure no guiding

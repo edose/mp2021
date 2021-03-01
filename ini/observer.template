@@ -1,0 +1,9 @@
+[Identity]
+Name = string -> name
+
+[ALCDEF]
+Contact Name = string -> alcdef contact name
+Contact Info = string -> alcdef contact info
+Observers    = string -> alcdef observers
+Filter       = string -> alcdef filter
+Mag band     = string -> alcdef mag band

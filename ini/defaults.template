@@ -1,0 +1,23 @@
+[Other ini files]
+Instrument ini = string -> instrument ini
+Site ini       = string -> site ini
+Observer ini   = string -> observer ini
+
+[Session]
+Session Top Directory     = string -> session top directory
+Session Control Filename  = string -> session control filename
+Session Log Filename      = string -> session log filename
+df_obs filename           = string -> df_obs filename
+df_images filename        = string -> df_images filename
+df_comps filename         = string -> df_comps filename
+Session image prefix      = string -> session image prefix
+Fit summary filename      = string -> fit summary filename
+ALCDEF filename prefix    = string -> alcdef filename prefix
+Canopus filename prefix   = string -> canopus filename prefix
+
+[Color]
+Color Top Directory     = string -> color top directory
+Color Control Filename  = string -> color control filename
+Color Log Filename      = string -> color log filename
+Color image prefix      = string -> color image prefix
+# ... and probably more to add later...

@@ -1,0 +1,15 @@
+[Site]
+Name     = string -> name
+MPC Code = string -> mpc code
+
+[Location]
+# Longitude, Latitude: decimal degrees; Elevation: meters.
+Longitude = float -> longitude
+Latitude  = float -> latitude
+Elevation = float -> elevation
+
+[Climate]
+# Coldest date of each year in mm-dd.
+Coldest Date = string -> coldest date
+# Each line: filter summer_extinction winter_extinction
+Extinctions = string list -> extinctions

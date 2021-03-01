@@ -1,0 +1,42 @@
+;----- This is control.txt for directory:
+;      C:\Dev\mp_phot\test\$sessions_for_test\MP_191\AN20200617
+;
+;===== REF STAR LOCATIONS BLOCK ==========================================
+;===== Enter at least 2 in the SAME image, before measure_mp() ===========
+;      Reference Star x,y positions for image alignment:
+#REF_STAR_LOCATION  MP_191-0001-Clear.fts  790.6  1115.0
+#REF_STAR_LOCATION  MP_191-0001-Clear.fts  819.3  1011.7
+#REF_STAR_LOCATION  MP_191-0001-Clear.fts  1060.4  1066.0
+;
+;===== MP LOCATIONS BLOCK ================================================
+;===== Enter exactly 2 in widely spaced images, before measure_mp() ======
+;      MP x,y positions for flux measurement:
+#MP_LOCATION  MP_191-0001-Clear.fts  826.4  1077.4
+#MP_LOCATION  MP_191-0028-Clear.fts  1144.3  1099.3
+;
+;===== MP RI COLOR BLOCK =================================================
+;===== Enter before do_mp_phot(), get from do_color. =====================
+#MP_RI_COLOR +0.220 ;  get by running do_color(), or leave as default=+0.220
+;
+;===== SELECTION CRITERIA BLOCK ==========================================
+;===== Enter before do_mp_phot() =========================================
+;      Selection criteria for comp stars, observations, images:
+;#COMP  nnnn nn,   nnn        ; to omit comp(s) by comp ID
+;#OBS nnn,nnnn nnnn   nn      ; to omit observation(s) by Serial number
+;#IMAGE  MP_mmmm-00nn-Clear   ; to omit one FITS image (.fts at end optional)
+#MIN_CATALOG_R_MAG 10.0       ; default=10.0
+#MAX_CATALOG_R_MAG 16.0       ; default=16.0
+#MAX_CATALOG_DR_MMAG 20.0     ; default=20.0
+#MIN_CATALOG_RI_COLOR 0.0     ; default=0.0
+#MAX_CATALOG_RI_COLOR 0.4     ; default=0.4
+;
+;===== REGRESSION OPTIONS BLOCK ==========================================
+;===== Enter before do_mp_phot(): ========================================
+;----- OPTIONS for regression model, rarely used:
+;Choices for #FIT_TRANSFORM: Fit=1; Fit=2; Use 0.2 0.4 [=tr1 & tr2 values]; Yes->Fit=1; No->Use 0 0
+#FIT_TRANSFORM  Fit=2         ; default= Fit=2
+#FIT_EXTINCTION Yes           ; default=Yes // choose Yes or No  (case-insensitive)
+#FIT_VIGNETTE Yes             ; default=Yes // choose Yes or No  (case-insensitive)
+#FIT_XY Yes                   ; default=Yes // choose Yes or No  (case-insensitive)
+#FIT_JD Yes                   ; default=Yes // choose Yes or No  (case-insensitive)
+;

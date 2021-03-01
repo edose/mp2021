@@ -1,0 +1,22 @@
+[Bulldozer]
+Ref Star XY    = string list -> ref star xy
+MP XY          = string list -> mp xy
+
+[Selection Criteria]
+Omit Comps   = string list -> omit comps
+Omit Obs     = string list -> omit obs
+# Omit Images: one filename per line only.
+Omit Images  = string list -> omit images
+Min Catalog r mag    = float -> min catalog r mag
+Max Catalog r mag    = float -> max catalog r mag
+Max Catalog dr mmag  = float -> max catalog dr mmag
+Min Catalog ri color = float -> min catalog ri color
+Max Catalog ri color = float -> max catalog ri color
+
+[Regression]
+MP ri Color    = float -> mp ri color
+Fit Transform  = string -> fit transform
+Fit Extinction = string -> fit extinction
+Fit Vignette   = boolean -> fit vignette
+Fit XY         = boolean -> fit xy
+Fit JD         = boolean -> fit jd
