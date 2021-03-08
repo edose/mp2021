@@ -18,6 +18,7 @@ import pandas as pd
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
+from astropak.image import FITS
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,15 +27,23 @@ INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 FOCAL_LENGTH_MAX_PCT_DEVIATION = 1.0
 
 
+class SessionIniFileError(Exception):
+    """ Raised on any fatal problem with session ini file."""
+
+
 class SessionLogFileError(Exception):
-    """ Raised on any problem with session log file."""
+    """ Raised on any fatal problem with session log file."""
+
+
+class SessionDataError(Exception):
+    """ Raised on any fatal problem with data, esp. with contents of FITS files."""
 
 
 def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
     # Adapted from mp_phot workflow_session.start().
     """ Launch one session of MP photometry workflow.
         Adapted from package mp_phot, workflow_session.py.start().
-        Example usage: phot.start('C:/Astro/MP Photometry/', 1111, 20200617, 'Clear')
+        Example usage: session.start('C:/Astro/MP Photometry/', 1111, 20200617, 'Clear')
     :param session_top_directory: path of lowest directory common to all MP lightcurve FITS, e.g.,
                'C:/Astro/MP Photometry'. None will use .ini file default (normal case). [string]
     :param mp_id: either a MP number, e.g., 1602 for Indiana [integer or string], or for an id string
@@ -76,7 +85,7 @@ def resume(session_top_directory=None, mp_id=None, an_date=None, filter=None):
     """ Restart a workflow in its correct working directory,
         but *keep* the previous log file--DO NOT overwrite it.
         Adapted from package mp_phot, workflow_session.py.resume().
-        Example usage: phot.resume('C:/Astro/MP Photometry/', 1111, 20200617, 'Clear')
+        Example usage: session.resume('C:/Astro/MP Photometry/', 1111, 20200617, 'Clear')
     Parameters are exactly as for .start().
     :return: [None]
     """
@@ -258,11 +267,41 @@ def assess(return_results=False):
         return return_dict
 
 
-def make_session_dfs():
+def make_dfs():
     """ Perform aperture photometry for one session of lightcurve photometry only.
         For color index determination, see .make_color_dfs().
-
         """
+    context, defaults_dict, session_dict, log_file = _session_setup('make_dfs()')
+    this_directory, mp_string, an_string, filter_string = context
+    fits_filenames = util.get_mp_filenames(this_directory)
+    if not fits_filenames:
+        raise SessionDataError('No FITS files found in session directory ' + this_directory)
+
+    # Validate MP XY filenames:
+    mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in session_dict['mp xy']]
+    if any([fn not in fits_filenames for fn in mp_location_filenames]):
+        raise SessionIniFileError('A MP XY file is missing from session directory ' + this_directory)
+
+    # Get basic data from all FITS files:
+    fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
+    invalid_fits_filenames = [fo.filename for fo in fits_objects if not fo.is_valid]
+    if invalid_fits_filenames:
+        for fn in invalid_fits_filenames:
+            print(' >>>>> WARNING: Invalid FITS filename ' + fn +
+                  ' is being skipped. User should explicitly exclude it.')
+    valid_fits_objects = [fo for fo in fits_objects if fo.is_valid]
+    utc_mids = [fo.utc_mid for fo in fits_objects]
+
+    # Get bounding box of all FITS, for catalog retrieval):
+    # TODO: ensure FITS class is correct before depending on its bounding boxes.
+    bounding_boxes = [fo.bounding_ra_dec for fo in fits_objects]
+
+
+
+
+
+
+
 
 
 _____SUPPORT_FUNCTIONS________________________________________ = 0
@@ -362,7 +401,7 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
     print('New ' + session_ini_filename + ' file written.\n')
 
 
-def _orient_this_function(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
+def _session_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     """ Typically called at the top of lightcurve workflow functions, to collect commonly required data.
     :return: tuple of data elements: context [tuple], defaults_dict [py dict], log_file [file object].
     """
@@ -371,7 +410,7 @@ def _orient_this_function(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
         return
     this_directory, mp_string, an_string, filter_string = context
     defaults_dict = ini.make_defaults_dict()
-    session_dict = ini._make_session_dict()
+    session_dict = ini.make_session_dict()
     log_filename = defaults_dict['session log filename']
     log_file = open(log_filename, mode='a')  # set up append to log file.
     log_file.write('\n===== ' + calling_function_name + '()  ' +

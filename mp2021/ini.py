@@ -125,11 +125,27 @@ def make_site_dict(defaults_dict):
     return site_dict
 
 
-def _make_session_dict(defaults_dict, session_directory):
+def make_session_dict(defaults_dict, session_directory):
     """ Read the session control file for this lightcurve session, return session dict.
     :param defaults_dict:
     :param session_directory:
     :return: session_dict [py dict].
+    Structure of session_dict:
+      { 'mp xy': [(filename1, x1, y1), (filename2, x2, y2)],
+        'omit comps': ['22', '44', '4221'],
+        'omit obs': ['4223', '429']
+        'omit images': ['MP_1443_0001-Clear.fts'],
+        'min catalog r mag': 12.5,
+        'max catalog r mag': 16,
+        'max catalog dr mmag': 15,
+        'min catalog ri color': 0.10,
+        'max catalog ri color': 0.34,
+        'mp ri color': +0.22,
+        'fit transform': ('Use', '+0.4', '-0.16'), or ('Use', '+0.4'), ('Fit', '1'), ('Fit', '2').
+        'fit extinction': (Use', '+0.16'), or 'Yes' to fit extinction.
+        'fit vignette': True,
+        'fit xy': False,
+        'fit jd': True }
     """
     session_ini_filename = defaults_dict['session control filename']
     fullpath = os.path.join(session_directory, session_ini_filename)

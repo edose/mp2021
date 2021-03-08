@@ -10,7 +10,7 @@ import astropy.io.fits as apyfits
 import pandas as pd
 
 # Author's packages:
-import mp2021.session as phot
+import mp2021.session as session
 import mp2021.ini as ini
 from mp2021.util import get_mp_filenames, fits_header_value
 
@@ -37,7 +37,7 @@ class Test_EarlyFunctions:
         temp_log_fullpath = os.path.join(temp_path, log_filename)
         assert not os.path.isfile(temp_log_fullpath)  # before start().
         assert os.getcwd() == source_path
-        phot.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
+        session.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
         assert os.getcwd() == temp_path
         assert os.path.isfile(temp_log_fullpath)
         assert set(get_mp_filenames(temp_path)) == set(get_mp_filenames(source_path))
@@ -46,7 +46,7 @@ class Test_EarlyFunctions:
         chdir_directory = os.path.join(TEST_SESSION_TOP_DIRECTORY,
                                        'MP_' + str(SOURCE_TEST_MP), 'AN' + str(TEST_AN))
         os.chdir(chdir_directory)  # start at source directory.
-        context_directory, mp_string, an_string, filter_string = phot._get_session_context()
+        context_directory, mp_string, an_string, filter_string = session._get_session_context()
         assert context_directory == chdir_directory
         assert mp_string == '191'
         assert an_string == '20200617'
@@ -56,32 +56,32 @@ class Test_EarlyFunctions:
     def test_resume(self, _temporary_session_directory):
         # Build temp directory and write session.log to it:
         source_path, temp_path = _temporary_session_directory
-        phot.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
+        session.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
         # Set current working directory elsewhere...:
         os.chdir(source_path)
         assert os.getcwd() == source_path
         # ...then verify .resume() can re-establish in correct directory.
-        phot.resume(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, filter='Clear')
+        session.resume(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, filter='Clear')
         assert os.getcwd() == temp_path
-        assert phot._get_session_context() == (temp_path, str(TEMP_TEST_MP), str(TEST_AN), 'Clear')
+        assert session._get_session_context() == (temp_path, str(TEMP_TEST_MP), str(TEST_AN), 'Clear')
 
     def test__write_session_ini_stub(self, _temporary_session_directory):
         """ Using same temporary test directory as test_start(). """
         source_path, temp_path = _temporary_session_directory
-        phot.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
+        session.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
         defaults_dict = ini.make_defaults_dict()
         session_ini_filename = defaults_dict['session control filename']
         session_ini_fullpath = os.path.join(temp_path, session_ini_filename)
         assert not os.path.isfile(session_ini_fullpath)
         filenames_time_order = _get_filenames_time_order(temp_path)
-        phot._write_session_ini_stub(temp_path, filenames_time_order)
+        session._write_session_ini_stub(temp_path, filenames_time_order)
         _session_ini_stub_appears_valid(session_ini_fullpath)
 
     def test_assess(self, _temporary_session_directory):
         """ Using same temporary test directory as test_start(). """
         source_path, temp_path = _temporary_session_directory
-        phot.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
-        d = phot.assess(return_results=True)
+        session.start(TEST_SESSION_TOP_DIRECTORY, TEMP_TEST_MP, TEST_AN, 'Clear')
+        d = session.assess(return_results=True)
         assert d['file not read'] == d['filter not read'] == []
         assert set(d['file count by filter']) == set([('Clear', 5), ('R', 1), ('I', 1)])
         assert d['warning count'] == 0
