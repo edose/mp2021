@@ -7,6 +7,7 @@ import os
 
 # External packages:
 import pytest
+import astropy.io.fits as apyfits
 
 # Author's packages:
 import mp2021.util as util
@@ -31,7 +32,7 @@ def test_parse_mp_id():
         _ = util.parse_mp_id('Vesta')
 
 
-def test_parse_an_id():
+def test_parse_an_date():
     assert util.parse_an_date(20200617) == '20200617'
     assert util.parse_an_date('20200617') == '20200617'
     with pytest.raises(TypeError):
@@ -55,3 +56,40 @@ def test_get_mp_filenames():
     assert len(set(mp_filenames)) == len(mp_filenames)  # filenames are unique.
 
 
+def test_fits_header_value():
+    fullpath = os.path.join(TEST_SESSIONS_DIRECTORY, 'MP_191', 'AN20200617', 'MP_191-0001-Clear.fts')
+    hdu = apyfits.open(fullpath)[0]
+    assert util.fits_header_value(hdu, 'FILTER') == 'Clear'
+    assert util.fits_header_value(hdu, 'NAXIS1') == 3072
+    assert util.fits_header_value(hdu, 'INVALID') is None
+
+
+def test_fits_is_plate_solved():
+    fullpath = os.path.join(TEST_SESSIONS_DIRECTORY, 'MP_191', 'AN20200617', 'MP_191-0001-Clear.fts')
+    hdu = apyfits.open(fullpath)[0]
+    assert util.fits_is_plate_solved(hdu) is True
+    hdu.header['CRVAL1'] = 'INVALID'
+    assert util.fits_is_plate_solved(hdu) is False
+    hdu = apyfits.open(fullpath)[0]
+    del hdu.header['CD2_1']
+    assert util.fits_is_plate_solved(hdu) is False
+
+
+def test_fits_is_calibrated():
+    fullpath = os.path.join(TEST_SESSIONS_DIRECTORY, 'MP_191', 'AN20200617', 'MP_191-0001-Clear.fts')
+    hdu = apyfits.open(fullpath)[0]
+    assert util.fits_is_calibrated(hdu) is True
+    hdu.header['CALSTAT'] = 'INVALID'
+    assert util.fits_is_calibrated(hdu) is False
+    del hdu.header['CALSTAT']
+    assert util.fits_is_calibrated(hdu) is False
+
+
+def test_fits_focal_length():
+    fullpath = os.path.join(TEST_SESSIONS_DIRECTORY, 'MP_191', 'AN20200617', 'MP_191-0001-Clear.fts')
+    hdu = apyfits.open(fullpath)[0]
+    focallen_value = util.fits_focal_length(hdu)
+    assert focallen_value == 2713.5
+    del hdu.header['FOCALLEN']
+    fl_value = util.fits_focal_length(hdu)
+    assert 0.97 * focallen_value <= fl_value <= 1.03 * focallen_value

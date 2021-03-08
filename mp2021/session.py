@@ -12,6 +12,8 @@ from collections import Counter
 
 # External packages:
 import astropy.io.fits as apyfits
+import numpy as np
+import pandas as pd
 
 # Author's packages:
 import mp2021.util as util
@@ -20,6 +22,8 @@ import mp2021.ini as ini
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
+
+FOCAL_LENGTH_MAX_PCT_DEVIATION = 1.0
 
 
 class SessionLogFileError(Exception):
@@ -107,11 +111,8 @@ def assess(return_results=False):
     :return: [None], or dict of summary info and warnings. [py dict]
     """
     # Setup, including initializing return_dict:
-    # (Can't use orient_this_function(), because control.ini may not exist yet.)
-    context = _get_session_context()
-    if context is None:
-        return
-    this_directory, mp_string, an_string, filter_string = context
+    # (Can't use orient_this_function(), because session.ini may not exist yet.)
+    this_directory, mp_string, an_string, filter_string = _get_session_context()
     defaults_dict = ini.make_defaults_dict()
     return_dict = {
         'file not read': [],         # list of filenames
@@ -132,7 +133,10 @@ def assess(return_results=False):
         fullpath = os.path.join(this_directory, filename)
         try:
             hdu = apyfits.open(fullpath)[0]
-        except:
+        except FileNotFoundError:
+            print(' >>>>> WARNING: can\'t find file', fullpath, 'Skipping file.')
+            return_dict['file not read'].append(filename)
+        except (OSError, UnicodeDecodeError):
             print(' >>>>> WARNING: can\'t read file', fullpath, 'as FITS. Skipping file.')
             return_dict['file not read'].append(filename)
         else:
@@ -153,7 +157,7 @@ def assess(return_results=False):
                        'Extension': fits_extensions.values}).sort_values(by=['Filename'])
     df = df.set_index('Filename', drop=False)
     df['PlateSolved'] = False
-    df['Calibrated'] = True
+    df['Calibrated'] = False
     df['FWHM'] = np.nan
     df['FocalLength'] = np.nan
 
@@ -162,15 +166,13 @@ def assess(return_results=False):
         fullpath = os.path.join(this_directory, filename)
         hdu = apyfits.open(fullpath)[0]  # already known to be valid, from above.
         df.loc[filename, 'PlateSolved'] = util.fits_is_plate_solved(hdu)
-        # TODO: if is plate solved, add FITS header line 'plate solution verified' etc.
-        # TODO: if is plate solved, calc and add any customary/PinPoint plate-sol lines back in.
         df.loc[filename, 'Calibrated'] = util.fits_is_calibrated(hdu)
         df.loc[filename, 'FWHM'] = util.fits_header_value(hdu, 'FWHM')
         df.loc[filename, 'FocalLength'] = util.fits_focal_length(hdu)
         jd_start = util.fits_header_value(hdu, 'JD')
         exposure = util.fits_header_value(hdu, 'EXPOSURE')
         jd_mid = jd_start + (exposure / 2) / 24 / 3600
-        df.loc[filename, 'JD_mid'] = jd_mid  # needed only to write control.ini stub.
+        df.loc[filename, 'JD_mid'] = jd_mid  # needed only to write session.ini stub.
 
     # Warn of FITS without plate solution:
     filenames_not_platesolved = df.loc[~ df['PlateSolved'], 'Filename']
@@ -221,8 +223,8 @@ def assess(return_results=False):
     median_fl = df['FocalLength'].median()
     for fn in df['Filename']:
         fl = df.loc[fn, 'FocalLength']
-        focus_length_pct_deviation = 100.0 * abs((fl - median_fl)) / median_fl
-        if focus_length_pct_deviation > FOCUS_LENGTH_MAX_PCT_DEVIATION:
+        focal_length_pct_deviation = 100.0 * abs((fl - median_fl)) / median_fl
+        if focal_length_pct_deviation > FOCAL_LENGTH_MAX_PCT_DEVIATION:
             odd_fl_list.append((fn, fl))
     if len(odd_fl_list) >= 1:
         print('\nUnusual FocalLength (vs median of ' + '{0:.1f}'.format(median_fl) + ' mm:')
@@ -235,13 +237,13 @@ def assess(return_results=False):
     return_dict['warning count'] += len(odd_fl_list)
 
     # Summarize and write instructions for user's next steps:
-    control_filename = defaults_dict['session control filename']
+    session_ini_filename = defaults_dict['session control filename']
     session_log_filename = defaults_dict['session log filename']
     session_log_fullpath = os.path.join(this_directory, session_log_filename)
     with open(session_log_fullpath, mode='w') as log_file:
         if return_dict['warning count'] == 0:
             print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
-            print('Next: (1) enter MP pixel positions in', control_filename,
+            print('Next: (1) enter MP pixel positions in', session_ini_filename,
                   'AND SAVE it,\n      (2) measure_mp()')
             log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
         else:
@@ -251,10 +253,19 @@ def assess(return_results=False):
 
     df_temporal = df.loc[:, ['Filename', 'JD_mid']].sort_values(by=['JD_mid'])
     filenames_temporal_order = df_temporal['Filename']
-    _write_control_ini_stub(this_directory, filenames_temporal_order)  # if it doesn't already exist.
+    _write_session_ini_stub(this_directory, filenames_temporal_order)  # if it doesn't already exist.
     if return_results:
         return return_dict
 
+
+def make_session_dfs():
+    """ Perform aperture photometry for one session of lightcurve photometry only.
+        For color index determination, see .make_color_dfs().
+
+        """
+
+
+_____SUPPORT_FUNCTIONS________________________________________ = 0
 
 
 def _get_session_context():
@@ -288,17 +299,17 @@ def _get_session_context():
     return this_directory, mp_string, an_string, filter_string
 
 
-def _write_control_ini_stub(this_directory, filenames_temporal_order):
-    """ Write the initial control file for this lightcurve session, later to be edited by user.
-        Called only by (at the end of) .assess().  DO NOT overwrite if control.ini exists.
+def _write_session_ini_stub(this_directory, filenames_temporal_order):
+    """ Write session's initial control (.ini) file, later to be edited by user.
+        Called only by (at the end of) .assess().  DO NOT overwrite if session.ini exists.
     :param this_directory:
     :param filenames_temporal_order: FITS filenames in ascending time order. [list of strings]
     :return:
     """
-    # Do not overwrite existing control file:
+    # Do not overwrite existing session ini file:
     defaults_dict = ini.make_defaults_dict()
-    control_ini_filename = defaults_dict['session control filename']
-    fullpath = os.path.join(this_directory, control_ini_filename)
+    session_ini_filename = defaults_dict['session control filename']
+    fullpath = os.path.join(this_directory, session_ini_filename)
     if os.path.exists(fullpath):
         return
 
@@ -310,7 +321,7 @@ def _write_control_ini_stub(this_directory, filenames_temporal_order):
 
     ini_lines = [
         '[Ini Template]',
-        'Filename = control.template',
+        'Filename = session.template',
         '']
     bulldozer_lines = [
         '[Bulldozer]',
@@ -348,4 +359,22 @@ def _write_control_ini_stub(this_directory, filenames_temporal_order):
     if not os.path.exists(fullpath):
         with open(fullpath, 'w') as f:
             f.writelines(ready_lines)
-    print('New ' + control_ini_filename + ' file written.\n')
+    print('New ' + session_ini_filename + ' file written.\n')
+
+
+def _orient_this_function(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
+    """ Typically called at the top of lightcurve workflow functions, to collect commonly required data.
+    :return: tuple of data elements: context [tuple], defaults_dict [py dict], log_file [file object].
+    """
+    context = _get_session_context()
+    if context is None:
+        return
+    this_directory, mp_string, an_string, filter_string = context
+    defaults_dict = ini.make_defaults_dict()
+    session_dict = ini._make_session_dict()
+    log_filename = defaults_dict['session log filename']
+    log_file = open(log_filename, mode='a')  # set up append to log file.
+    log_file.write('\n===== ' + calling_function_name + '()  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+    return context, defaults_dict, session_dict, log_file
+

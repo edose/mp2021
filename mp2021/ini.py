@@ -119,7 +119,103 @@ def make_site_dict(defaults_dict):
         try:
             summer_extinction, winter_extinction = float(items[1]), float(items[2])
         except ValueError:
-            raise ValueError(' >>>>> ERROR:', filename, 'bad extinction line:', line) from None
+            raise IniParseError('Site ini: bad extinction line:', line) from None
         extinction_dict[filter_name] = tuple([summer_extinction, winter_extinction])
     site_dict['extinctions'] = extinction_dict
     return site_dict
+
+
+def _make_session_dict(defaults_dict, session_directory):
+    """ Read the session control file for this lightcurve session, return session dict.
+    :param defaults_dict:
+    :param session_directory:
+    :return: session_dict [py dict].
+    """
+    session_ini_filename = defaults_dict['session control filename']
+    fullpath = os.path.join(session_directory, session_ini_filename)
+    session_ini = astropak.ini.IniFile(fullpath, template_directory_path=INI_DIRECTORY)
+    session_dict = session_ini.value_dict  # raw values, a few to be reparsed just below:
+
+    # ########## package mp2021 will have NO Ref Stars, as they are not needed until Bulldozer.
+    # # Bulldozer section:
+    # # Parse and overwrite 'ref star xy':
+    # ref_star_xy_list = []
+    # ref_star_xy_lines = [line.strip() for line in control_dict['ref star xy']]
+    # for line in ref_star_xy_lines:
+    #     items = line.replace(',', ' ').rsplit(maxsplit=2)  # for each line, items are: filename x y
+    #     if len(items) == 3:
+    #         filename = items[0]
+    #         x = ini.float_or_warn(items[1], filename + 'Ref Star X' + items[1])
+    #         y = ini.float_or_warn(items[2], filename + 'Ref Star Y' + items[2])
+    #         ref_star_xy_list.append((filename, x, y))
+    #     elif len(items >= 1):
+    #         print(' >>>>> ERROR: ' + items[1] + ' Ref Star XY invalid: ' + line)
+    #         return None
+    # if len(ref_star_xy_list) < 2:
+    #     print(' >>>>> ERROR: control \'ref star xy\' has fewer than 2 entries, not allowed.')
+    # control_dict['ref star xy'] = ref_star_xy_list
+
+    # Parse and overwrite 'mp xy':
+    mp_xy_list = []
+    mp_xy_lines = [line.strip() for line in session_dict['mp xy']]
+    for line in mp_xy_lines:
+        items = line.replace(',', ' ').rsplit(maxsplit=2)  # for each line, items are: filename x y
+        if len(items) != 3:
+            raise IniParseError('Session ini: MP x,y line: ' + line)
+        filename = items[0]
+        try:
+            x, y = float(items[1]), float(items[2])
+        except ValueError:
+            raise ValueError('Session ini: MP x or y is not a float.')
+        mp_xy_list.append((filename, x, y))
+    if len(mp_xy_list) != 2:
+        raise IniParseError('Session ini: MP x,y lines must number exactly 2.')
+    session_dict['mp xy'] = mp_xy_list
+
+    # Selection Criteria section, Omit elements:
+    session_dict['omit comps'] = _multiline_ini_value_to_items(' '.join(session_dict['omit comps']))
+    session_dict['omit obs'] = _multiline_ini_value_to_items(' '.join(session_dict['omit obs']))
+    session_dict['omit images'] = [s.strip() for s in session_dict['omit images']]
+    try:
+        omit_comps_as_ints = [int(comp) for comp in session_dict['omit comps']]
+    except ValueError:
+        raise ValueError('Session ini: at least one Omit Comps entry is not an integer.') from None
+    if any([(i < 1) for i in omit_comps_as_ints]):
+        raise IniParseError('Session ini: at least one Omit Comps entry is not a positive integer.') \
+            from None
+    try:
+        omit_obs_as_ints = [int(obs) for obs in session_dict['omit obs']]
+    except ValueError:
+        raise ValueError('Session ini: at least one Omit Obs entry is not an integer.') from None
+    if any([(i < 1) for i in omit_obs_as_ints]):
+        raise IniParseError('Session ini: at least one Omit Obs entry is not a positive integer.') from None
+
+    # Standardize remaining elements:
+    try:
+        _ = float(session_dict['mp ri color'])
+    except ValueError:
+        raise ValueError('Session ini: MP ri Color is not a float: ' +
+                         session_dict['mp ri color']) from None
+    session_dict['fit transform'] = tuple([item.lower()
+                                           for item in session_dict['fit transform'].split()])
+    session_dict['fit extinction'] = tuple([item.lower()
+                                            for item in session_dict['fit extinction'].split()])
+    if len(session_dict['fit extinction']) == 1:
+        session_dict['fit extinction'] = session_dict['fit extinction'][0]
+    return session_dict
+
+
+_____INI_UTILITIES______________________________________ = 0
+
+
+def _multiline_ini_value_to_lines(value):
+    lines = list(filter(None, (x.strip() for x in value.splitlines())))
+    lines = [line.replace(',', ' ').strip() for line in lines]  # replace commas with spaces
+    return lines
+
+
+def _multiline_ini_value_to_items(value):
+    lines = _multiline_ini_value_to_lines(value)
+    value_list = []
+    _ = [value_list.extend(line.split()) for line in lines]
+    return value_list
