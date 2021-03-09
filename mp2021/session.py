@@ -8,7 +8,7 @@ __author__ = "Eric Dose, Albuquerque"
 # Python core:
 import os
 from datetime import datetime, timezone, timedelta
-from collections import Counter
+from collections import Counter, OrderedDict
 
 # External packages:
 import astropy.io.fits as apyfits
@@ -18,8 +18,9 @@ import pandas as pd
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
-from astropak.image import FITS, aggregate_bounding_ra_dec
+from astropak.image import FITS, aggregate_bounding_ra_dec, PointSourceAp, MovingSourceAp
 from astropak.catalogs import Refcat2
+from astropak.util import RaDec, jd_from_datetime_utc
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -283,29 +284,64 @@ def make_dfs():
     if any([fn not in fits_filenames for fn in mp_location_filenames]):
         raise SessionIniFileError('A MP XY file is missing from session directory ' + this_directory)
 
-    # Assemble valid FITS objects:
-    fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
-    invalid_fits_filenames = [fo.filename for fo in fits_objects if not fo.is_valid]
+    # Assemble valid, time-sorted FITS objects into (1) a list and (2) an OrderedDict by filename:
+    all_fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
+    invalid_fits_filenames = [fo.filename for fo in all_fits_objects if not fo.is_valid]
     if invalid_fits_filenames:
         for fn in invalid_fits_filenames:
             print(' >>>>> WARNING: Invalid FITS filename ' + fn +
                   ' is being skipped. User should explicitly exclude it.')
-    valid_fits_objects = [fo for fo in fits_objects if fo.is_valid]
-    del fits_objects
+    fits_objects = [fo for fo in all_fits_objects if fo.is_valid]
+    fits_objects = sorted(fits_objects, key=lambda fo: fo.utc_mid)
+    fits_object_dict = OrderedDict((fo.filename, fo) for fo in fits_objects)
 
     # Get ATLAS refcat2 comp stars covering bounding region of all images:
     aggr_ra_deg_min, aggr_ra_deg_max, aggr_dec_deg_min, aggr_dec_deg_max = \
-        aggregate_bounding_ra_dec(valid_fits_objects, extension_percent=3)
+        aggregate_bounding_ra_dec(fits_objects, extension_percent=3)
     refcat2 = Refcat2(ra_deg_range=(aggr_ra_deg_min, aggr_ra_deg_max),
                       dec_deg_range=(aggr_dec_deg_min, aggr_dec_deg_max))
     info_lines = screen_comps_for_photometry(refcat2, session_dict)
-    utc_mids = [fo.utc_mid for fo in valid_fits_objects]
+    utc_mids = [fo.utc_mid for fo in fits_objects]
     utc_mid_session = min(utc_mids) + (max(utc_mids) - min(utc_mids)) / 2
     refcat2.update_epoch(utc_mid_session)
     print('\n'.join(info_lines), '\n')
     log_file.write('\n'.join(info_lines), '\n')
 
-    # Do comp star aperture photometry:
+    # Make comp star apertures (dict of lists of ap objects):
+    instrument_dict = ini.make_instrument_dict(defaults_dict)
+    disc_radius = 1.8 * instrument_dict['nominal fwhm pixels']
+    gap = 1.2 * instrument_dict['nominal fwhm pixels']
+    outer_radius = 4.0 * instrument_dict['nominal fwhm pixels']
+    background_width = outer_radius - disc_radius - gap
+    ap_radec_centers = [RaDec(ra, dec)
+                        for (ra, dec) in zip(refcat2.df_selected['RA_deg'], refcat2.df_selected['Dec_deg'])]
+    comp_apertures = OrderedDict()
+    for fo in fits_objects:
+        xy_centers = [fo.xy_from_radec(radec) for radec in ap_radec_centers]
+        ap_list = [PointSourceAp(fo.image, xy, disc_radius, gap, background_width) for xy in xy_centers]
+        comp_apertures[fo.filename] = ap_list
+
+    # Make MP apertures (dict of ap objects, one ap per image):
+    utc0, ra0, dec0, ra_per_second, dec_per_second = \
+        calc_mp_motion(session_dict, fits_object_dict, log_file)
+    mp_apertures = OrderedDict()
+    for fo in fits_objects:
+        dt_start = (fo.utc_start - utc0).total_seconds()
+        dt_end = dt_start + fo.exposure
+        ra_start = ra0 + dt_start * ra_per_second
+        ra_end = ra0 + dt_end * ra_per_second
+        dec_start = dec0 + dt_start * dec_per_second
+        dec_end = dec0 + dt_end * dec_per_second
+        xy_start = fo.xy_from_radec(RaDec(ra_start, dec_start))
+        xy_end = fo.xy_from_radec(RaDec(ra_end, dec_end))
+        ap = MovingSourceAp(fo.image, xy_start, xy_end, disc_radius, gap, background_width)
+        mp_apertures[fo.filename] = ap
+
+    # Gather data for df_image and df_obs:
+    image_dict_list = []
+    df_image_obs_list = []
+    # TODO: Resume here after straightening out Ap class and subclasses (sigh).
+
 
 
 
@@ -455,4 +491,39 @@ def screen_comps_for_photometry(refcat2, session_dict):
     refcat2.remove_overlapping()
     info.append('Refcat2: overlaps removed to ' + str(len(refcat2.df_selected)) + ' stars.')
     return info
+
+
+def calc_mp_motion(session_dict, fits_object_dict, log_file):
+    """ From two user-selected images and x,y locations, return data sufficient to locate MP in all images.
+    :param session_dict:
+    :param fits_object_dict:
+    :param log_file: log file object ready for use in write(), or None not to write to log file.
+    :return: utc0, ra0, dec0, ra_per_second, dec_per_second [tuple of floats]
+    """
+    # Get MP's RA and Dec in user-selected images:
+    mp_location_filenames = [item[0] for item in session_dict['mp xy']][:2]
+    mp_location_fits_objects = [fits_object_dict[fn] for fn in mp_location_filenames]
+    mp_location_xy = [(item[1], item[2]) for item in session_dict['mp xy']][:2]
+    mp_datetime, mp_ra_deg, mp_dec_deg = [], [], []
+    for i in range(2):
+        fo = mp_location_fits_objects[i]
+        x, y = mp_location_xy[i][0], mp_location_xy[i][1]
+        radec = fo.radec_from_xy(x, y)
+        mp_datetime.append(fo.utc_mid)
+        mp_ra_deg.append(radec.ra)
+        mp_dec_deg.append(radec.dec)
+
+    # Calculate MP reference location and motion:
+    utc0, ra0, dec0 = mp_datetime[0], mp_ra_deg[0], mp_dec_deg[0]
+    span_seconds = (mp_datetime[1] - utc0).total_seconds()
+    ra_per_second = (mp_ra_deg[1] - ra0) / span_seconds
+    dec_per_second = (mp_dec_deg[1] - dec0) / span_seconds
+    if log_file is not None:
+        log_file.write('MP at JD ' + '{0:.5f}'.format(jd_from_datetime_utc(utc0)) + ':  RA,Dec='
+                       + '{0:.5f}'.format(ra0) + u'\N{DEGREE SIGN}' + ', '
+                       + '{0:.5f}'.format(dec0) + u'\N{DEGREE SIGN}' + ',  d(RA,Dec)/hour='
+                       + '{0:.6f}'.format(ra_per_second * 3600.0) + ', '
+                       + '{0:.6f}'.format(dec_per_second * 3600.0) + '\n')
+    return utc0, ra0, dec0, ra_per_second, dec_per_second
+
 
