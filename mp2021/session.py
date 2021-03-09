@@ -18,7 +18,8 @@ import pandas as pd
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
-from astropak.image import FITS
+from astropak.image import FITS, aggregate_bounding_ra_dec
+from astropak.catalogs import Refcat2
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -282,7 +283,7 @@ def make_dfs():
     if any([fn not in fits_filenames for fn in mp_location_filenames]):
         raise SessionIniFileError('A MP XY file is missing from session directory ' + this_directory)
 
-    # Get basic data from all FITS files:
+    # Assemble valid FITS objects:
     fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
     invalid_fits_filenames = [fo.filename for fo in fits_objects if not fo.is_valid]
     if invalid_fits_filenames:
@@ -290,11 +291,22 @@ def make_dfs():
             print(' >>>>> WARNING: Invalid FITS filename ' + fn +
                   ' is being skipped. User should explicitly exclude it.')
     valid_fits_objects = [fo for fo in fits_objects if fo.is_valid]
-    utc_mids = [fo.utc_mid for fo in fits_objects]
+    del fits_objects
 
-    # Get bounding box of all FITS, for catalog retrieval):
-    # TODO: ensure FITS class is correct before depending on its bounding boxes.
-    bounding_boxes = [fo.bounding_ra_dec for fo in fits_objects]
+    # Get ATLAS refcat2 comp stars covering bounding region of all images:
+    aggr_ra_deg_min, aggr_ra_deg_max, aggr_dec_deg_min, aggr_dec_deg_max = \
+        aggregate_bounding_ra_dec(valid_fits_objects, extension_percent=3)
+    refcat2 = Refcat2(ra_deg_range=(aggr_ra_deg_min, aggr_ra_deg_max),
+                      dec_deg_range=(aggr_dec_deg_min, aggr_dec_deg_max))
+    info_lines = screen_comps_for_photometry(refcat2, session_dict)
+    utc_mids = [fo.utc_mid for fo in valid_fits_objects]
+    utc_mid_session = min(utc_mids) + (max(utc_mids) - min(utc_mids)) / 2
+    refcat2.update_epoch(utc_mid_session)
+    print('\n'.join(info_lines), '\n')
+    log_file.write('\n'.join(info_lines), '\n')
+
+    # Do comp star aperture photometry:
+
 
 
 
@@ -416,4 +428,31 @@ def _session_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     log_file.write('\n===== ' + calling_function_name + '()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     return context, defaults_dict, session_dict, log_file
+
+
+def screen_comps_for_photometry(refcat2, session_dict):
+    """ Applies ATLAS refcat2 screens to refcat2 object IN-PLACE. Returns info text.
+    :param refcat2: ATLAS refcat2 catalog from astropak.catalog.py. [Refcat2 object]
+    :param session_dict:
+    :return info: text documenting actions taken. [list of strings]
+    """
+    info = []
+    refcat2.select_min_r_mag(session_dict['min catalog r mag'])
+    info.append('Refcat2: min(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_max_r_mag(session_dict['max catalog r mag'])
+    info.append('Refcat2: max(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    # refcat2.select_max_g_uncert(MAX_G_UNCERT)
+    # info.append('Refcat2: max(dg) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_max_r_uncert(session_dict['max catalog dr mmag'])
+    info.append('Refcat2: max(dr) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    # refcat2.select_max_i_uncert(MAX_I_UNCERT)
+    # info.append('Refcat2: max(di) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_sloan_ri_color(session_dict['min catalog ri color'],
+                                  session_dict['max catalog ri color'])
+    info.append('Refcat2: Sloan ri color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    # refcat2.select_dgaia()
+    # lines.append('Refcat2: dgaia screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.remove_overlapping()
+    info.append('Refcat2: overlaps removed to ' + str(len(refcat2.df_selected)) + ' stars.')
+    return info
 
