@@ -1,5 +1,7 @@
 __author__ = "Eric Dose, Albuquerque"
 
+from mp2021.util import Instrument
+
 """ This module: Workflow for MP (minor planet) photometry. 
     The workflow is applied to a "session" = one MP's images from one imaging night.
     Intended for lightcurves in support of determining MP rotation rates.    
@@ -7,7 +9,7 @@ __author__ = "Eric Dose, Albuquerque"
 
 # Python core:
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from collections import Counter, OrderedDict
 from math import floor, log10, log
 
@@ -28,6 +30,9 @@ THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 
 FOCAL_LENGTH_MAX_PCT_DEVIATION = 1.0
+SOURCE_RADIUS_IN_FWHM = 1.8
+AP_GAP_IN_FWHM = 1.2
+BACKGROUND_WIDTH_IN_FWHM = 1.0
 
 
 class SessionIniFileError(Exception):
@@ -276,6 +281,9 @@ def make_dfs():
         """
     context, defaults_dict, session_dict, log_file = _session_setup('make_dfs()')
     this_directory, mp_string, an_string, filter_string = context
+    instrument_dict = ini.make_instrument_dict(defaults_dict)
+    instrument = Instrument(instrument_dict)
+
     fits_filenames = util.get_mp_filenames(this_directory)
     if not fits_filenames:
         raise SessionDataError('No FITS files found in session directory ' + this_directory)
@@ -283,9 +291,44 @@ def make_dfs():
     # Validate MP XY filenames:
     mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in session_dict['mp xy']]
     if any([fn not in fits_filenames for fn in mp_location_filenames]):
-        raise SessionIniFileError('A MP XY file is missing from session directory ' + this_directory)
+        raise SessionIniFileError('A file specified by MP XY is missing from session directory ' +
+                                  this_directory)
 
-    # Assemble valid, time-sorted FITS objects into (1) a list and (2) an OrderedDict by filename:
+    fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
+
+    df_images = _make_df_images(fits_objects)
+
+    refcat2 = get_refcat2_comp_stars(session_dict, fits_objects, log_file)
+
+    df_comps = _make_df_comps(refcat2)
+
+    background_width, comp_apertures, disc_radius, gap = \
+        _make_comp_star_apertures(fits_objects, instrument, refcat2)
+
+    df_comp_obs = _make_df_comp_obs(comp_apertures, instrument)
+
+    mp_apertures = _make_mp_apertures(fits_object_dict, mp_string, session_dict,
+                                      disc_radius, gap, background_width, log_file)
+
+    # Make df_mp_obs:
+    mp_obs_dict_list = []
+    for fn, ap in mp_apertures.items():
+        if ap.is_valid and ap.net_flux > 0:
+            pass
+
+
+
+
+
+_____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
+
+
+def make_fits_objects(this_directory, fits_filenames):
+    """ Assemble valid, time-sorted FITS objects into (1) a list and (2) an OrderedDict by filename:
+    :param this_directory:
+    :param fits_filenames:
+    :return:
+    """
     all_fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
     invalid_fits_filenames = [fo.filename for fo in all_fits_objects if not fo.is_valid]
     if invalid_fits_filenames:
@@ -295,8 +338,10 @@ def make_dfs():
     fits_objects = [fo for fo in all_fits_objects if fo.is_valid]
     fits_objects = sorted(fits_objects, key=lambda fo: fo.utc_mid)
     fits_object_dict = OrderedDict((fo.filename, fo) for fo in fits_objects)
+    return fits_objects, fits_object_dict
 
-    # Make df_image:
+
+def _make_df_images(fits_objects):
     earliest_jd_mid = min([jd_from_datetime_utc(fo.utc_mid) for fo in fits_objects])
     jd_floor = floor(earliest_jd_mid)
     image_dict_list = []
@@ -316,8 +361,10 @@ def make_dfs():
         image_dict_list.append(image_dict)
     df_image = pd.DataFrame(data=image_dict_list).sort_by('JD_mid')
     df_image.index = df_image['FITSfile'].values
+    return df_image
 
-    # Get ATLAS refcat2 comp stars covering bounding region of all images:
+
+def get_refcat2_comp_stars(session_dict, fits_objects, log_file):
     aggr_ra_deg_min, aggr_ra_deg_max, aggr_dec_deg_min, aggr_dec_deg_max = \
         aggregate_bounding_ra_dec(fits_objects, extension_percent=3)
     refcat2 = Refcat2(ra_deg_range=(aggr_ra_deg_min, aggr_ra_deg_max),
@@ -328,8 +375,10 @@ def make_dfs():
     refcat2.update_epoch(utc_mid_session)
     print('\n'.join(info_lines), '\n')
     log_file.write('\n'.join(info_lines), '\n')
+    return refcat2
 
-    # Make df_comps:
+
+def _make_df_comps(refcat2):
     df_comps = refcat2.selected_columns(['RA_deg', 'Dec_deg', 'RP1', 'R1', 'R10',
                                          'g', 'dg', 'r', 'dr', 'i', 'di', 'z', 'dz',
                                          'BminusV', 'APASS_R', 'T_eff', 'CatalogID'])
@@ -337,13 +386,11 @@ def make_dfs():
     df_comps.index = comp_ids
     df_comps.insert(0, 'CompID', comp_ids)
     print('df_comps:', str(len(df_comps)), 'comps retained.')
+    return df_comps
 
-    # Make comp star apertures (dict of lists of ap objects):
-    instrument_dict = ini.make_instrument_dict(defaults_dict)
-    disc_radius = 1.8 * instrument_dict['nominal fwhm pixels']
-    gap = 1.2 * instrument_dict['nominal fwhm pixels']
-    outer_radius = 4.0 * instrument_dict['nominal fwhm pixels']
-    background_width = outer_radius - disc_radius - gap
+
+def _make_comp_star_apertures(fits_objects, instrument, refcat2):
+    disc_radius, gap, background_width = instrument.nominal_ap_profile
     ap_radec_centers = [RaDec(ra, dec)
                         for (ra, dec) in zip(refcat2.df_selected['RA_deg'], refcat2.df_selected['Dec_deg'])]
     source_ids = [i + 1 for i in range(len(ap_radec_centers))]
@@ -354,27 +401,22 @@ def make_dfs():
                        for (xy, source_id) in zip(xy_centers, source_ids)]
         ap_list = [raw_ap.recenter() for raw_ap in raw_ap_list]
         comp_apertures[fo.filename] = ap_list
+    return background_width, comp_apertures, disc_radius, gap
 
-    # Make df_comp_obs (will be part of df_comp):
-    gain = instrument_dict.get('ccd gain', 1)
-    ccd_x_center = instrument_dict('x pixels') / 2
-    ccd_y_center = instrument_dict('y pixels') / 2
-    dist2_at_corner = ccd_x_center ** 2 + ccd_y_center ** 2
-    vignetting_drop_at_1024 = (instrument_dict['vignetting pct at corner'] / 100.0) * \
-                              ((1024 ** 2) / dist2_at_corner)
-    saturation_adu = instrument_dict['saturation adu']
+
+def _make_df_comp_obs(comp_apertures, instrument):
+    gain = instrument.gain
     comp_obs_dict_list = []
-    for fo in fits_objects:
-        for ap in comp_apertures[fo.filename]:
-            if ap.is_valid:
-                x1024 = (ap.xy_center.x - ccd_x_center) / 1024
-                y1024 = (ap.xy_center.y - ccd_y_center) / 1024
-                dist2_at_xy = x1024 ** 2 + y1024 ** 2
-                expected_vignette_drop = vignetting_drop_at_1024 * (dist2_at_xy / (1024 ** 2))
-                appears_saturated = ap.foreground_max >= saturation_adu * (1.0 - expected_vignette_drop)
-                if (ap.net_flux > 0) and (not appears_saturated):
+    for filename in comp_apertures.keys():
+        for ap in comp_apertures[filename]:
+            if ap.is_valid and ap.net_flux > 0:
+                x1024 = instrument.x1024(ap.xy_center.x)
+                y1024 = instrument.y1024(ap.xy_center.y)
+                vignette = x1024 ** 2 + y1024 ** 2
+                any_pixel_saturated = instrument.is_saturated(ap.foreground_max)
+                if not any_pixel_saturated:
                     comp_obs_dict = {
-                        'FITSfile': fo.filename,
+                        'FITSfile': filename,
                         'SourceID': ap.source_id,
                         'Type': 'Comp',
                         'InstMag': -2.5 * log10(ap.net_flux),
@@ -385,19 +427,32 @@ def make_dfs():
                         'SkyRadiusInner': ap.foreground_radius + ap.gap,
                         'SkyRadiusOuter': ap.foreground_radius + ap.gap + ap.background_width,
                         'SkySigma': ap.background_std,
-                        'Vignette': dist2_at_xy,
+                        'Vignette': vignette,
                         'X1024': x1024,
                         'Y1024': y1024,
                         'Xcentroid': ap.xy_centroid.x,
                         'Ycentroid': ap.xy_centroid.y}
                     comp_obs_dict_list.append(comp_obs_dict)
     df_comp_obs = pd.DataFrame(data=comp_obs_dict_list)
+    return df_comp_obs
 
-    # Make MP apertures (dict of ap objects, one ap per image):
+
+def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
+                       disc_radius, gap, background_width, log_file):
+    """ Make mp_apertures, one row per MP (thus one row per FITS file).
+    :param fits_object_dict:
+    :param mp_string:
+    :param session_dict:
+    :param disc_radius:
+    :param gap:
+    :param background_width:
+    :param log_file:
+    :return:
+    """
     utc0, ra0, dec0, ra_per_second, dec_per_second = \
         calc_mp_motion(session_dict, fits_object_dict, log_file)
     mp_apertures = OrderedDict()
-    for fo in fits_objects:
+    for filename, fo in fits_object_dict.items():
         dt_start = (fo.utc_start - utc0).total_seconds()
         dt_end = dt_start + fo.exposure
         ra_start = ra0 + dt_start * ra_per_second
@@ -409,25 +464,7 @@ def make_dfs():
         ap = MovingSourceAp(fo.image, xy_start, xy_end, disc_radius, gap, background_width,
                             source_id=mp_string)
         mp_apertures[fo.filename] = ap
-
-
-
-
-
-
-
-
-
-    # Make df_obs:
-    # df_image_obs_list = []
-    # for fo in fits_objects:
-
-
-
-
-
-
-_____SUPPORT_FUNCTIONS________________________________________ = 0
+    return mp_apertures
 
 
 def _get_session_context():
@@ -552,17 +589,15 @@ def screen_comps_for_photometry(refcat2, session_dict):
     info.append('Refcat2: min(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_r_mag(session_dict['max catalog r mag'])
     info.append('Refcat2: max(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    # refcat2.select_max_g_uncert(MAX_G_UNCERT)
-    # info.append('Refcat2: max(dg) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_max_g_uncert(session_dict['max catalog dg mmag'])
+    info.append('Refcat2: max(dg) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_r_uncert(session_dict['max catalog dr mmag'])
     info.append('Refcat2: max(dr) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    # refcat2.select_max_i_uncert(MAX_I_UNCERT)
-    # info.append('Refcat2: max(di) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_max_i_uncert(session_dict['max catalog di mmag'])
+    info.append('Refcat2: max(di) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_sloan_ri_color(session_dict['min catalog ri color'],
                                   session_dict['max catalog ri color'])
     info.append('Refcat2: Sloan ri color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    # refcat2.select_dgaia()
-    # lines.append('Refcat2: dgaia screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.remove_overlapping()
     info.append('Refcat2: overlaps removed to ' + str(len(refcat2.df_selected)) + ' stars.')
     return info

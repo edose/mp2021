@@ -1,5 +1,7 @@
 __author__ = "Eric Dose, Albuquerque"
 
+from mp2021.session import SOURCE_RADIUS_IN_FWHM, AP_GAP_IN_FWHM, BACKGROUND_WIDTH_IN_FWHM
+
 """ This module: Utilities in service of other modules. """
 
 # Python core:
@@ -159,3 +161,41 @@ def fits_focal_length(hdu):
     fl_x = x_pixel_size / abs(x_pixel_scale) * (206265.0 / (3600 * 1000))
     fl_y = y_pixel_size / abs(y_pixel_scale) * (206265.0 / (3600 * 1000))
     return (fl_x + fl_y) / 2.0
+
+
+class Instrument:
+    """ Contains data (from instrument_dict) for instrument and does calculations dependent on it."""
+    def __init__(self, instrument_dict):
+        self.instrument_dict = instrument_dict
+        self.x_size = instrument_dict['x pixels']
+        self.y_size = instrument_dict['y pixels']
+        self.x_center = self.x_size / 2
+        self.y_center = self.y_size / 2
+        self.dist2_at_corner = self.x_center ** 2 + self.y_center ** 2
+        self.vignetting_drop_at_1024 = (instrument_dict['vignetting pct at corner'] / 100.0) * \
+                                       ((1024 ** 2) / self.dist2_at_corner)
+        self.saturation_adu = instrument_dict['saturation adu']
+
+    @property
+    def gain(self):
+        return self.instrument_dict.get('ccd gain', 1)
+
+    @property
+    def nominal_ap_profile(self):
+        source_radius = SOURCE_RADIUS_IN_FWHM * self.instrument_dict['nominal fwhm pixels']
+        gap = AP_GAP_IN_FWHM * self.instrument_dict['nominal fwhm pixels']
+        background_width = BACKGROUND_WIDTH_IN_FWHM * self.instrument_dict['nominal fwhm pixels']
+        return source_radius, gap, background_width
+
+    def x1024(self, x):
+        return (x - self.x_center) / 1024.0
+
+    def y1024(self, y):
+        return (y - self.y_center) / 1024.0
+
+    def is_saturated(self, x, y, adu):
+        """ Return True if (vignetting-corrected = in original image) adu was probably saturated. """
+        dist2_at_xy = self.x1024(x) ** 2 + self.y1024(y) ** 2
+        expected_vignette_drop = self.vignetting_drop_at_1024 * (dist2_at_xy / (1024 ** 2))
+        pixel_saturated = adu >= (self.saturation_adu * (1.0 - expected_vignette_drop))
+        return pixel_saturated
