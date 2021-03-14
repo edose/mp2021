@@ -38,7 +38,7 @@ def test_make_instrument_dict():
     assert id['x pixels'] == 3048
     assert id['y pixels'] == 2047
     assert id['saturation adu'] == 54000
-    assert id['max vignetting pct at corner'] == 38
+    assert id['vignetting pct at corner'] == 38
     assert id['pinpoint pixel scale multiplier'] == pytest.approx(0.99388)
     assert id['available filters'] == ('B', 'V', 'R', 'I', 'Clear', 'SG', 'SR', 'SI')
     assert id['mag exposures'] == {'Clear': ((13, 60), (14, 80), (15, 160), (16, 300),

@@ -9,6 +9,7 @@ __author__ = "Eric Dose, Albuquerque"
 import os
 from datetime import datetime, timezone, timedelta
 from collections import Counter, OrderedDict
+from math import floor, log10, log
 
 # External packages:
 import astropy.io.fits as apyfits
@@ -295,6 +296,27 @@ def make_dfs():
     fits_objects = sorted(fits_objects, key=lambda fo: fo.utc_mid)
     fits_object_dict = OrderedDict((fo.filename, fo) for fo in fits_objects)
 
+    # Make df_image:
+    earliest_jd_mid = min([jd_from_datetime_utc(fo.utc_mid) for fo in fits_objects])
+    jd_floor = floor(earliest_jd_mid)
+    image_dict_list = []
+    for fo in fits_objects:
+        jd_mid = jd_from_datetime_utc(fo.utc_mid)
+        jd_fract = jd_mid - jd_floor
+        image_dict = {
+            'FITSfile': fo.filename,
+            'JD_mid': jd_mid,
+            'Filter': fo.filter,
+            'Exposure': fo.exposure,
+            'Airmass': fo.airmass,  # will be overwritten by per-obs airmass.
+            'JD_start': jd_from_datetime_utc(fo.utc_start),
+            'UTC_start': fo.utc_start,
+            'UTC_mid': fo.utc_mid,
+            'JD_fract': jd_fract}
+        image_dict_list.append(image_dict)
+    df_image = pd.DataFrame(data=image_dict_list).sort_by('JD_mid')
+    df_image.index = df_image['FITSfile'].values
+
     # Get ATLAS refcat2 comp stars covering bounding region of all images:
     aggr_ra_deg_min, aggr_ra_deg_max, aggr_dec_deg_min, aggr_dec_deg_max = \
         aggregate_bounding_ra_dec(fits_objects, extension_percent=3)
@@ -307,6 +329,15 @@ def make_dfs():
     print('\n'.join(info_lines), '\n')
     log_file.write('\n'.join(info_lines), '\n')
 
+    # Make df_comps:
+    df_comps = refcat2.selected_columns(['RA_deg', 'Dec_deg', 'RP1', 'R1', 'R10',
+                                         'g', 'dg', 'r', 'dr', 'i', 'di', 'z', 'dz',
+                                         'BminusV', 'APASS_R', 'T_eff', 'CatalogID'])
+    comp_ids = [i + 1 for i in range(len(df_comps))]
+    df_comps.index = comp_ids
+    df_comps.insert(0, 'CompID', comp_ids)
+    print('df_comps:', str(len(df_comps)), 'comps retained.')
+
     # Make comp star apertures (dict of lists of ap objects):
     instrument_dict = ini.make_instrument_dict(defaults_dict)
     disc_radius = 1.8 * instrument_dict['nominal fwhm pixels']
@@ -315,11 +346,52 @@ def make_dfs():
     background_width = outer_radius - disc_radius - gap
     ap_radec_centers = [RaDec(ra, dec)
                         for (ra, dec) in zip(refcat2.df_selected['RA_deg'], refcat2.df_selected['Dec_deg'])]
+    source_ids = [i + 1 for i in range(len(ap_radec_centers))]
     comp_apertures = OrderedDict()
     for fo in fits_objects:
         xy_centers = [fo.xy_from_radec(radec) for radec in ap_radec_centers]
-        ap_list = [PointSourceAp(fo.image, xy, disc_radius, gap, background_width) for xy in xy_centers]
+        raw_ap_list = [PointSourceAp(fo.image, xy, disc_radius, gap, background_width, source_id)
+                       for (xy, source_id) in zip(xy_centers, source_ids)]
+        ap_list = [raw_ap.recenter() for raw_ap in raw_ap_list]
         comp_apertures[fo.filename] = ap_list
+
+    # Make df_comp_obs (will be part of df_comp):
+    gain = instrument_dict.get('ccd gain', 1)
+    ccd_x_center = instrument_dict('x pixels') / 2
+    ccd_y_center = instrument_dict('y pixels') / 2
+    dist2_at_corner = ccd_x_center ** 2 + ccd_y_center ** 2
+    vignetting_drop_at_1024 = (instrument_dict['vignetting pct at corner'] / 100.0) * \
+                              ((1024 ** 2) / dist2_at_corner)
+    saturation_adu = instrument_dict['saturation adu']
+    comp_obs_dict_list = []
+    for fo in fits_objects:
+        for ap in comp_apertures[fo.filename]:
+            if ap.is_valid:
+                x1024 = (ap.xy_center.x - ccd_x_center) / 1024
+                y1024 = (ap.xy_center.y - ccd_y_center) / 1024
+                dist2_at_xy = x1024 ** 2 + y1024 ** 2
+                expected_vignette_drop = vignetting_drop_at_1024 * (dist2_at_xy / (1024 ** 2))
+                appears_saturated = ap.foreground_max >= saturation_adu * (1.0 - expected_vignette_drop)
+                if (ap.net_flux > 0) and (not appears_saturated):
+                    comp_obs_dict = {
+                        'FITSfile': fo.filename,
+                        'SourceID': ap.source_id,
+                        'Type': 'Comp',
+                        'InstMag': -2.5 * log10(ap.net_flux),
+                        'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
+                        'DiscRadius': ap.foreground_radius,
+                        'FWHM': ap.fwhm,
+                        'SkyADU': ap.background_level,
+                        'SkyRadiusInner': ap.foreground_radius + ap.gap,
+                        'SkyRadiusOuter': ap.foreground_radius + ap.gap + ap.background_width,
+                        'SkySigma': ap.background_std,
+                        'Vignette': dist2_at_xy,
+                        'X1024': x1024,
+                        'Y1024': y1024,
+                        'Xcentroid': ap.xy_centroid.x,
+                        'Ycentroid': ap.xy_centroid.y}
+                    comp_obs_dict_list.append(comp_obs_dict)
+    df_comp_obs = pd.DataFrame(data=comp_obs_dict_list)
 
     # Make MP apertures (dict of ap objects, one ap per image):
     utc0, ra0, dec0, ra_per_second, dec_per_second = \
@@ -334,18 +406,21 @@ def make_dfs():
         dec_end = dec0 + dt_end * dec_per_second
         xy_start = fo.xy_from_radec(RaDec(ra_start, dec_start))
         xy_end = fo.xy_from_radec(RaDec(ra_end, dec_end))
-        ap = MovingSourceAp(fo.image, xy_start, xy_end, disc_radius, gap, background_width)
+        ap = MovingSourceAp(fo.image, xy_start, xy_end, disc_radius, gap, background_width,
+                            source_id=mp_string)
         mp_apertures[fo.filename] = ap
 
-    # Gather data for df_image and df_obs:
-    image_dict_list = []
-    df_image_obs_list = []
-    # TODO: Resume here after straightening out Ap class and subclasses (sigh).
 
 
 
 
 
+
+
+
+    # Make df_obs:
+    # df_image_obs_list = []
+    # for fo in fits_objects:
 
 
 
@@ -491,6 +566,25 @@ def screen_comps_for_photometry(refcat2, session_dict):
     refcat2.remove_overlapping()
     info.append('Refcat2: overlaps removed to ' + str(len(refcat2.df_selected)) + ' stars.')
     return info
+
+
+def saturation_sat_at_xy1024(x1024, y1024, vignette_at_1024, adu_saturation):
+    """ Return estimated saturation ADU limit from aperture's distances from image center."""
+    dist2 = x1024 ** 2 + y1024 ** 2
+    fraction_decreased = vignette_at_1024 * (dist2 / 1024) ** 2
+    return adu_saturation * (1.0 - fraction_decreased)
+
+
+# def adu_sat_from_xy(x1024, y1024):
+#     """ Return estimated saturation ADU limit from aperture's distances from image center.
+#     :param x1024: pixels/1024 in x-direction of aperture center from image center. [float]
+#     :param y1024: pixels/1024 in y-direction of aperture center from image center. [float]
+#     :return: estimated saturation ADU at given image position. [float]
+#     """
+#     r2 = x1024 ** 2 + y1024 ** 2
+#     fract_dist2_to_vign_pt = r2 / ((VIGNETTING[0] / 1024.0) ** 2)
+#     fract_decr = (1.0 - VIGNETTING[1]) * fract_dist2_to_vign_pt
+#     return ADU_SATURATED * (1.0 - fract_decr)
 
 
 def calc_mp_motion(session_dict, fits_object_dict, log_file):

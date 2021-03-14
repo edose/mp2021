@@ -18,7 +18,7 @@ Y Pixels       = int    -> y pixels
 # Gain is in electrons/ADU.
 CCD Gain       = float  -> ccd gain
 Saturation ADU = int    -> saturation adu
-Max Vignetting Pct At Corner = float -> max vignetting pct at corner
+Vignetting Pct At Corner = float -> vignetting pct at corner
 
 [Plate Solution]
 Pinpoint Pixel Scale Multiplier = float -> pinpoint pixel scale multiplier
