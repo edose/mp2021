@@ -11,10 +11,14 @@ from mp2021.util import Instrument
 import os
 from datetime import datetime, timezone
 from collections import Counter, OrderedDict
-from math import floor, log10, log
+from math import floor, log10, log, sin
 
 # External packages:
 import astropy.io.fits as apyfits
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
+from astropy import units as u
+from astroplan import Observer
 import numpy as np
 import pandas as pd
 
@@ -24,6 +28,7 @@ import mp2021.ini as ini
 from astropak.image import FITS, aggregate_bounding_ra_dec, PointSourceAp, MovingSourceAp
 from astropak.catalogs import Refcat2
 from astropak.util import RaDec, jd_from_datetime_utc
+from astropak.reference import DEGREES_PER_RADIAN
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +38,7 @@ FOCAL_LENGTH_MAX_PCT_DEVIATION = 1.0
 SOURCE_RADIUS_IN_FWHM = 1.8
 AP_GAP_IN_FWHM = 1.2
 BACKGROUND_WIDTH_IN_FWHM = 1.0
+MINIMUM_COMP_OBS_COUNT = 5
 
 
 class SessionIniFileError(Exception):
@@ -283,6 +289,8 @@ def make_dfs():
     this_directory, mp_string, an_string, filter_string = context
     instrument_dict = ini.make_instrument_dict(defaults_dict)
     instrument = Instrument(instrument_dict)
+    disc_radius, gap, background_width = instrument.nominal_ap_profile
+    site_dict = ini.make_site_dict(defaults_dict)
 
     fits_filenames = util.get_mp_filenames(this_directory)
     if not fits_filenames:
@@ -291,54 +299,45 @@ def make_dfs():
     # Validate MP XY filenames:
     mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in session_dict['mp xy']]
     if any([fn not in fits_filenames for fn in mp_location_filenames]):
-        raise SessionIniFileError('A file specified by MP XY is missing from session directory ' +
-                                  this_directory)
+        raise SessionIniFileError('A MP XY file not found in session directory ' + this_directory)
 
     fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
-
     df_images = _make_df_images(fits_objects)
 
-    refcat2 = get_refcat2_comp_stars(session_dict, fits_objects, log_file)
+    # Get and screen catalog entries for comp stars:
+    refcat2 = get_refcat2_comp_stars(fits_objects)
+    info_lines = screen_comps_for_photometry(refcat2, session_dict)  # in-place screening.
+    print('\n'.join(info_lines), '\n')
+    log_file.write('\n'.join(info_lines), '\n')
 
+    # Make comp-star apertures, comps dataframe, and obs dataframe:
     df_comps = _make_df_comps(refcat2)
+    comp_apertures_dict = _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
+    df_comp_obs = _make_df_comp_obs(comp_apertures_dict, df_comps, instrument)
 
-    background_width, comp_apertures, disc_radius, gap = \
-        _make_comp_star_apertures(fits_objects, instrument, refcat2)
+    # Make MP apertures and obs dataframe:
+    mp_apertures_dict, mp_mid_radec_dict = _make_mp_apertures(fits_object_dict, mp_string, session_dict,
+                                                              disc_radius, gap, background_width, log_file)
+    df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument)
 
-    df_comp_obs = _make_df_comp_obs(comp_apertures, instrument)
+    # Post-process dataframes:
+    _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
+    _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
+    _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
 
-    mp_apertures = _make_mp_apertures(fits_object_dict, mp_string, session_dict,
-                                      disc_radius, gap, background_width, log_file)
+    # Write dataframes to CSV files:
+    _write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
+    _write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
+    _write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
+    _write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
 
-    # Make df_mp_obs:
-    mp_obs_dict_list = []
-    for fn, ap in mp_apertures.items():
-        if ap.is_valid and ap.net_flux > 0:
-            pass
-
-
-
-
-
-_____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
+    log_file.close()
+    print('\nNext: (1) enter comp selection limits and model options in ' +
+          defaults_dict['session control filename'],
+          '\n      (2) run do_mp_phot()\n')
 
 
-def make_fits_objects(this_directory, fits_filenames):
-    """ Assemble valid, time-sorted FITS objects into (1) a list and (2) an OrderedDict by filename:
-    :param this_directory:
-    :param fits_filenames:
-    :return:
-    """
-    all_fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
-    invalid_fits_filenames = [fo.filename for fo in all_fits_objects if not fo.is_valid]
-    if invalid_fits_filenames:
-        for fn in invalid_fits_filenames:
-            print(' >>>>> WARNING: Invalid FITS filename ' + fn +
-                  ' is being skipped. User should explicitly exclude it.')
-    fits_objects = [fo for fo in all_fits_objects if fo.is_valid]
-    fits_objects = sorted(fits_objects, key=lambda fo: fo.utc_mid)
-    fits_object_dict = OrderedDict((fo.filename, fo) for fo in fits_objects)
-    return fits_objects, fits_object_dict
+_____APERTURES_and_DATAFRAMES_____________________________________________ = 0
 
 
 def _make_df_images(fits_objects):
@@ -364,20 +363,6 @@ def _make_df_images(fits_objects):
     return df_image
 
 
-def get_refcat2_comp_stars(session_dict, fits_objects, log_file):
-    aggr_ra_deg_min, aggr_ra_deg_max, aggr_dec_deg_min, aggr_dec_deg_max = \
-        aggregate_bounding_ra_dec(fits_objects, extension_percent=3)
-    refcat2 = Refcat2(ra_deg_range=(aggr_ra_deg_min, aggr_ra_deg_max),
-                      dec_deg_range=(aggr_dec_deg_min, aggr_dec_deg_max))
-    info_lines = screen_comps_for_photometry(refcat2, session_dict)
-    utc_mids = [fo.utc_mid for fo in fits_objects]
-    utc_mid_session = min(utc_mids) + (max(utc_mids) - min(utc_mids)) / 2
-    refcat2.update_epoch(utc_mid_session)
-    print('\n'.join(info_lines), '\n')
-    log_file.write('\n'.join(info_lines), '\n')
-    return refcat2
-
-
 def _make_df_comps(refcat2):
     df_comps = refcat2.selected_columns(['RA_deg', 'Dec_deg', 'RP1', 'R1', 'R10',
                                          'g', 'dg', 'r', 'dr', 'i', 'di', 'z', 'dz',
@@ -389,22 +374,22 @@ def _make_df_comps(refcat2):
     return df_comps
 
 
-def _make_comp_star_apertures(fits_objects, instrument, refcat2):
-    disc_radius, gap, background_width = instrument.nominal_ap_profile
-    ap_radec_centers = [RaDec(ra, dec)
-                        for (ra, dec) in zip(refcat2.df_selected['RA_deg'], refcat2.df_selected['Dec_deg'])]
-    source_ids = [i + 1 for i in range(len(ap_radec_centers))]
-    comp_apertures = OrderedDict()
+def _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width):
+    comp_radec_dict = {comp_id: RaDec(df_comps.loc[comp_id, 'RA_deg'], df_comps.loc[comp_id, 'Dec_deg'])
+                       for comp_id in df_comps.index}
+    comp_apertures_dict = OrderedDict()
     for fo in fits_objects:
-        xy_centers = [fo.xy_from_radec(radec) for radec in ap_radec_centers]
-        raw_ap_list = [PointSourceAp(fo.image, xy, disc_radius, gap, background_width, source_id)
-                       for (xy, source_id) in zip(xy_centers, source_ids)]
-        ap_list = [raw_ap.recenter() for raw_ap in raw_ap_list]
-        comp_apertures[fo.filename] = ap_list
-    return background_width, comp_apertures, disc_radius, gap
+        ap_list = []
+        for comp_id in df_comps.index:
+            xy = fo.xy_from_radec(comp_radec_dict[comp_id])
+            raw_ap = PointSourceAp(fo.image, xy, disc_radius, gap, background_width, comp_id)
+            ap = raw_ap.recenter()
+            ap_list.append(ap)
+        comp_apertures_dict[fo.filename] = ap_list
+    return comp_apertures_dict
 
 
-def _make_df_comp_obs(comp_apertures, instrument):
+def _make_df_comp_obs(comp_apertures, df_comps, instrument):
     gain = instrument.gain
     comp_obs_dict_list = []
     for filename in comp_apertures.keys():
@@ -431,7 +416,9 @@ def _make_df_comp_obs(comp_apertures, instrument):
                         'X1024': x1024,
                         'Y1024': y1024,
                         'Xcentroid': ap.xy_centroid.x,
-                        'Ycentroid': ap.xy_centroid.y}
+                        'Ycentroid': ap.xy_centroid.y,
+                        'RA_deg': df_comps.loc[ap.source_id, 'RA_deg'],
+                        'Dec_deg': df_comps.loc[ap.source_id, 'Dec_deg']}
                     comp_obs_dict_list.append(comp_obs_dict)
     df_comp_obs = pd.DataFrame(data=comp_obs_dict_list)
     return df_comp_obs
@@ -451,7 +438,8 @@ def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
     """
     utc0, ra0, dec0, ra_per_second, dec_per_second = \
         calc_mp_motion(session_dict, fits_object_dict, log_file)
-    mp_apertures = OrderedDict()
+    mp_apertures_dict = OrderedDict()
+    mp_mid_radec_dict = OrderedDict()
     for filename, fo in fits_object_dict.items():
         dt_start = (fo.utc_start - utc0).total_seconds()
         dt_end = dt_start + fo.exposure
@@ -463,8 +451,123 @@ def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
         xy_end = fo.xy_from_radec(RaDec(ra_end, dec_end))
         ap = MovingSourceAp(fo.image, xy_start, xy_end, disc_radius, gap, background_width,
                             source_id=mp_string)
-        mp_apertures[fo.filename] = ap
-    return mp_apertures
+        mp_apertures_dict[fo.filename] = ap
+        ra_mid = (ra_start + ra_end) / 2
+        dec_mid = (dec_start + dec_end) / 2
+        mp_mid_radec_dict[filename] = RaDec(ra_mid, dec_mid)
+    return mp_apertures_dict, mp_mid_radec_dict
+
+
+def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
+    gain = instrument.gain
+    mp_obs_dict_list = []
+    for filename, ap in mp_apertures.items():
+        if ap.is_valid and ap.net_flux > 0:
+            x1024 = instrument.x1024(ap.xy_center.x)
+            y1024 = instrument.y1024(ap.xy_center.y)
+            vignette = x1024 ** 2 + y1024 ** 2
+            any_pixel_saturated = instrument.is_saturated(ap.foreground_max)
+            if not any_pixel_saturated:
+                mp_obs_dict = {
+                    'FITSfile': filename,
+                    'SourceID': ap.source_id,
+                    'Type': 'MP',
+                    'InstMag': -2.5 * log10(ap.net_flux),
+                    'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
+                    'DiscRadius': ap.foreground_radius,
+                    'FWHM': ap.fwhm,
+                    'SkyADU': ap.background_level,
+                    'SkyRadiusInner': ap.foreground_radius + ap.gap,
+                    'SkyRadiusOuter': ap.foreground_radius + ap.gap + ap.background_width,
+                    'SkySigma': ap.background_std,
+                    'Vignette': vignette,
+                    'X1024': x1024,
+                    'Y1024': y1024,
+                    'Xcentroid': ap.xy_centroid.x,
+                    'Ycentroid': ap.xy_centroid.y,
+                    'Xstart': ap.xy_start.x,
+                    'Ystart': ap.xy_start.y,
+                    'Xend': ap.xy_end.x,
+                    'Yend': ap.xy_end.y,
+                    'RA_deg_mid': mp_mid_radec_dict[filename].ra,
+                    'Dec_deg_mid': mp_mid_radec_dict[filename].dec}
+                mp_obs_dict_list.append(mp_obs_dict)
+    df_mp_obs = pd.DataFrame(data=mp_obs_dict_list)
+    return df_mp_obs
+
+
+def _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs):
+    for filename in fits_object_dict.keys():
+        mp_obs_count = sum(df_mp_obs['FITSfile'] == filename)
+        if mp_obs_count != 1:
+            df_images = df_images.loc[df_images['FITSfile'] != filename, :]
+            df_comp_obs = df_comp_obs.loc[df_comp_obs['FITSfile'] != filename, :]
+            df_mp_obs = df_mp_obs.loc[df_mp_obs['FITSfile'] != filename, :]
+
+
+def _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images):
+    observer = Observer(longitude=site_dict['longitude'],
+                        latitude=site_dict['latitude'],
+                        elevation=site_dict['elevation'])
+    df_comp_obs['ObsAirmass'] = df_comp_obs['Airmass'].copy()
+    skycoord_dict = {comp_id: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                     for (comp_id, ra_deg, dec_deg)
+                     in zip(df_comps.index, df_comps['RA_deg'], df_comps['Dec_deg'])}
+    altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
+                        for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
+    for obs in df_comp_obs.index:
+        filename = df_comp_obs.loc[obs, 'FITSfile']
+        alt = skycoord_dict[obs].transform_to(altaz_frame_dict[filename]).alt.value
+        df_comp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+
+
+def _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
+    observer = Observer(longitude=site_dict['longitude'],
+                        latitude=site_dict['latitude'],
+                        elevation=site_dict['elevation'])
+    df_mp_obs['ObsAirmass'] = df_mp_obs['Airmass'].copy()
+    skycoord_dict = {filename: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                     for (filename, ra_deg, dec_deg) in zip(df_mp_obs['FITSfile'],
+                                                            df_mp_obs['RA_deg_mid'],
+                                                            df_mp_obs['Dec_deg_mid'])}
+    altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
+                        for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
+    for obs in df_mp_obs.index:
+        filename = df_mp_obs.loc[obs, 'FITSfile']
+        alt = skycoord_dict[filename].transform_to(altaz_frame_dict[filename]).alt.value
+        df_mp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+
+
+_____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
+
+
+def make_fits_objects(this_directory, fits_filenames):
+    """ Assemble valid, time-sorted FITS objects into (1) a list and (2) an OrderedDict by filename:
+    :param this_directory:
+    :param fits_filenames:
+    :return:
+    """
+    all_fits_objects = [FITS(this_directory, '', fn) for fn in fits_filenames]
+    invalid_fits_filenames = [fo.filename for fo in all_fits_objects if not fo.is_valid]
+    if invalid_fits_filenames:
+        for fn in invalid_fits_filenames:
+            print(' >>>>> WARNING: Invalid FITS filename ' + fn +
+                  ' is skipped. User should explicitly exclude it (e.g., move to Exclude subdir.')
+    fits_objects = [fo for fo in all_fits_objects if fo.is_valid]
+    fits_objects = sorted(fits_objects, key=lambda fo: fo.utc_mid)
+    fits_object_dict = OrderedDict((fo.filename, fo) for fo in fits_objects)
+    return fits_objects, fits_object_dict
+
+
+def get_refcat2_comp_stars(fits_objects):
+    aggr_ra_deg_min, aggr_ra_deg_max, aggr_dec_deg_min, aggr_dec_deg_max = \
+        aggregate_bounding_ra_dec(fits_objects, extension_percent=3)
+    refcat2 = Refcat2(ra_deg_range=(aggr_ra_deg_min, aggr_ra_deg_max),
+                      dec_deg_range=(aggr_dec_deg_min, aggr_dec_deg_max))
+    utc_mids = [fo.utc_mid for fo in fits_objects]
+    utc_mid_session = min(utc_mids) + (max(utc_mids) - min(utc_mids)) / 2
+    refcat2.update_epoch(utc_mid_session)
+    return refcat2
 
 
 def _get_session_context():
@@ -610,18 +713,6 @@ def saturation_sat_at_xy1024(x1024, y1024, vignette_at_1024, adu_saturation):
     return adu_saturation * (1.0 - fraction_decreased)
 
 
-# def adu_sat_from_xy(x1024, y1024):
-#     """ Return estimated saturation ADU limit from aperture's distances from image center.
-#     :param x1024: pixels/1024 in x-direction of aperture center from image center. [float]
-#     :param y1024: pixels/1024 in y-direction of aperture center from image center. [float]
-#     :return: estimated saturation ADU at given image position. [float]
-#     """
-#     r2 = x1024 ** 2 + y1024 ** 2
-#     fract_dist2_to_vign_pt = r2 / ((VIGNETTING[0] / 1024.0) ** 2)
-#     fract_decr = (1.0 - VIGNETTING[1]) * fract_dist2_to_vign_pt
-#     return ADU_SATURATED * (1.0 - fract_decr)
-
-
 def calc_mp_motion(session_dict, fits_object_dict, log_file):
     """ From two user-selected images and x,y locations, return data sufficient to locate MP in all images.
     :param session_dict:
@@ -656,3 +747,38 @@ def calc_mp_motion(session_dict, fits_object_dict, log_file):
     return utc0, ra0, dec0, ra_per_second, dec_per_second
 
 
+def _write_df_images_csv(df_images, this_directory, defaults_dict, log_file):
+    filename_df_images = defaults_dict['df_images filename']
+    fullpath_df_images = os.path.join(this_directory, filename_df_images)
+    df_images.to_csv(fullpath_df_images, sep=';', quotechar='"',
+                     quoting=2, index=True)  # quoting=2 means quotes around non-numerics.
+    print('images written to', fullpath_df_images)
+    log_file.write(filename_df_images + ' written: ' + str(len(df_images)) + ' images.\n')
+
+
+def _write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file):
+    filename_df_comps = defaults_dict['df_comps filename']
+    fullpath_df_comps = os.path.join(this_directory, filename_df_comps)
+    df_comps.to_csv(fullpath_df_comps, sep=';', quotechar='"',
+                    quoting=2, index=True)  # quoting=2 means quotes around non-numerics.
+    print('comps written to', fullpath_df_comps)
+    log_file.write(filename_df_comps + ' written: ' + str(len(df_comps)) + ' comp stars.\n')
+
+
+def _write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file):
+    filename_df_comp_obs = defaults_dict['df_comp_obs filename']
+    fullpath_df_comp_obs = os.path.join(this_directory, filename_df_comp_obs)
+    df_comp_obs.to_csv(fullpath_df_comp_obs, sep=';', quotechar='"',
+                       quoting=2, index=True)  # quoting=2 means quotes around non-numerics.
+    print('comp observations written to', fullpath_df_comp_obs)
+    log_file.write(filename_df_comp_obs + ' written: '
+                   + str(len(df_comp_obs)) + ' comp star observations.\n')
+
+
+def _write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file):
+    filename_df_mp_obs = defaults_dict['df_mp_obs filename']
+    fullpath_df_mp_obs = os.path.join(this_directory, filename_df_mp_obs)
+    df_mp_obs.to_csv(fullpath_df_mp_obs, sep=';', quotechar='"',
+                     quoting=2, index=True)  # quoting=2 means quotes around non-numerics.
+    print('MP observations written to', fullpath_df_mp_obs)
+    log_file.write(filename_df_mp_obs + ' written: ' + str(len(df_mp_obs)) + ' MP observations.\n')

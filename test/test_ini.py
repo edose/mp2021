@@ -22,6 +22,7 @@ def test_make_defaults_dict():
     dd = ini.make_defaults_dict(ini_dir=INI_DIRECTORY, filename='defaults.ini')
     assert dd['instrument ini'] == 'BoreaC14.ini'
     assert dd['session log filename'] == 'session.log'
+    assert dd['df_comp_obs filename'] == 'df_comp_obs_all.csv'
     assert dd['color control filename'] == 'color_control.ini'
     assert dd.get('not an element') is None
 

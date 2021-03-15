@@ -7,9 +7,11 @@ Observer ini   = string -> observer ini
 Session Top Directory     = string -> session top directory
 Session Control Filename  = string -> session control filename
 Session Log Filename      = string -> session log filename
-df_obs filename           = string -> df_obs filename
 df_images filename        = string -> df_images filename
 df_comps filename         = string -> df_comps filename
+df_comp_obs filename      = string -> df_comp_obs filename
+df_mp_obs filename        = string -> df_mp_obs filename
+
 Session image prefix      = string -> session image prefix
 Fit summary filename      = string -> fit summary filename
 ALCDEF filename prefix    = string -> alcdef filename prefix
