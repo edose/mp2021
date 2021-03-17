@@ -1,6 +1,8 @@
-[Bulldozer]
-Ref Star XY    = string list -> ref star xy
+[MP Location]
 MP XY          = string list -> mp xy
+
+# [Bulldozer]
+# Ref Star XY    = string list -> ref star xy
 
 [Selection Criteria]
 Omit Comps   = string list -> omit comps
@@ -10,6 +12,7 @@ Omit Images  = string list -> omit images
 Min Catalog r mag    = float -> min catalog r mag
 Max Catalog r mag    = float -> max catalog r mag
 Max Catalog dr mmag  = float -> max catalog dr mmag
+Max Catalog di mmag  = float -> max catalog di mmag
 Min Catalog ri color = float -> min catalog ri color
 Max Catalog ri color = float -> max catalog ri color
 

@@ -1,8 +1,6 @@
 __author__ = "Eric Dose, Albuquerque"
 
-from mp2021.session import SOURCE_RADIUS_IN_FWHM, AP_GAP_IN_FWHM, BACKGROUND_WIDTH_IN_FWHM
-
-""" This module: Utilities in service of other modules. """
+""" This module: Utilities in service of other mp2021 modules. """
 
 # Python core:
 import os
@@ -11,7 +9,7 @@ import os
 import pandas as pd
 
 # Author's packages:
-import mp2021.ini as ini
+# import mp2021.ini as ini
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +18,10 @@ INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 EARLIEST_APPLICABLE_AN = 20000000
 LATEST_APPLICABLE_AN = 21000000
 VALID_FITS_FILE_EXTENSIONS = ('.fits', '.fit', '.fts')
+
+SOURCE_RADIUS_IN_FWHM = 1.8
+AP_GAP_IN_FWHM = 1.2
+BACKGROUND_WIDTH_IN_FWHM = 1.0
 
 
 class SessionLogFileError(Exception):

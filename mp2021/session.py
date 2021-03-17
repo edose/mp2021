@@ -17,7 +17,7 @@ from math import floor, log10, log, sin
 import astropy.io.fits as apyfits
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
-from astropy import units as u
+import astropy.units as u
 from astroplan import Observer
 import numpy as np
 import pandas as pd
@@ -35,10 +35,13 @@ THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 
 FOCAL_LENGTH_MAX_PCT_DEVIATION = 1.0
-SOURCE_RADIUS_IN_FWHM = 1.8
-AP_GAP_IN_FWHM = 1.2
-BACKGROUND_WIDTH_IN_FWHM = 1.0
 MINIMUM_COMP_OBS_COUNT = 5
+INITIAL_MIN_R_MAG = 10
+INITIAL_MAX_R_MAG = 16
+INITIAL_MAX_DR_MMAG = 20
+INITIAL_MAX_DI_MMAG = 20
+INITIAL_MIN_RI_COLOR = 0.0
+INITIAL_MAX_RI_COLOR = 0.44
 
 
 class SessionIniFileError(Exception):
@@ -89,7 +92,7 @@ def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
         log_file.write('AN: ' + an_string + '\n')
         log_file.write('FILTER:' + filter + '\n')
         log_file.write('This log started: ' +
-                       '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+                       '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n\n')
     print('Log file started.')
     print('Next: assess()')
 
@@ -135,7 +138,12 @@ def assess(return_results=False):
     """
     # Setup, including initializing return_dict:
     # (Can't use orient_this_function(), because session.ini may not exist yet.)
-    this_directory, mp_string, an_string, filter_string = _get_session_context()
+    try:
+        context = _get_session_context()
+    except SessionLogFileError as e:
+        print(' >>>>> ERROR: ' + str(e))
+        return
+    this_directory, mp_string, an_string, filter_string = context
     defaults_dict = ini.make_defaults_dict()
     return_dict = {
         'file not read': [],         # list of filenames
@@ -263,7 +271,7 @@ def assess(return_results=False):
     session_ini_filename = defaults_dict['session control filename']
     session_log_filename = defaults_dict['session log filename']
     session_log_fullpath = os.path.join(this_directory, session_log_filename)
-    with open(session_log_fullpath, mode='w') as log_file:
+    with open(session_log_fullpath, mode='a') as log_file:
         if return_dict['warning count'] == 0:
             print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
             print('Next: (1) enter MP pixel positions in', session_ini_filename,
@@ -299,25 +307,26 @@ def make_dfs():
     # Validate MP XY filenames:
     mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in session_dict['mp xy']]
     if any([fn not in fits_filenames for fn in mp_location_filenames]):
-        raise SessionIniFileError('A MP XY file not found in session directory ' + this_directory)
+        raise SessionIniFileError('At least 1 MP XY file not found in session directory ' + this_directory)
 
     fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
     df_images = _make_df_images(fits_objects)
 
     # Get and screen catalog entries for comp stars:
     refcat2 = get_refcat2_comp_stars(fits_objects)
-    info_lines = screen_comps_for_photometry(refcat2, session_dict)  # in-place screening.
+    info_lines = initial_screen_comps(refcat2)  # in-place screening.
     print('\n'.join(info_lines), '\n')
-    log_file.write('\n'.join(info_lines), '\n')
+    log_file.write('\n'.join(info_lines) + '\n')
 
-    # Make comp-star apertures, comps dataframe, and obs dataframe:
+    # Make comp-star apertures, comps dataframe, and comp obs dataframe:
     df_comps = _make_df_comps(refcat2)
     comp_apertures_dict = _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
     df_comp_obs = _make_df_comp_obs(comp_apertures_dict, df_comps, instrument)
 
-    # Make MP apertures and obs dataframe:
+    # Make MP apertures and MP obs dataframe:
     mp_apertures_dict, mp_mid_radec_dict = _make_mp_apertures(fits_object_dict, mp_string, session_dict,
-                                                              disc_radius, gap, background_width, log_file)
+                                                              disc_radius, gap, background_width, log_file,
+                                                              starting_obs_id=len(df_comp_obs))
     df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument)
 
     # Post-process dataframes:
@@ -358,7 +367,7 @@ def _make_df_images(fits_objects):
             'UTC_mid': fo.utc_mid,
             'JD_fract': jd_fract}
         image_dict_list.append(image_dict)
-    df_image = pd.DataFrame(data=image_dict_list).sort_by('JD_mid')
+    df_image = pd.DataFrame(data=image_dict_list).sort_values(by='JD_mid')
     df_image.index = df_image['FITSfile'].values
     return df_image
 
@@ -367,7 +376,7 @@ def _make_df_comps(refcat2):
     df_comps = refcat2.selected_columns(['RA_deg', 'Dec_deg', 'RP1', 'R1', 'R10',
                                          'g', 'dg', 'r', 'dr', 'i', 'di', 'z', 'dz',
                                          'BminusV', 'APASS_R', 'T_eff', 'CatalogID'])
-    comp_ids = [i + 1 for i in range(len(df_comps))]
+    comp_ids = [str(i + 1) for i in range(len(df_comps))]
     df_comps.index = comp_ids
     df_comps.insert(0, 'CompID', comp_ids)
     print('df_comps:', str(len(df_comps)), 'comps retained.')
@@ -378,13 +387,19 @@ def _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_wi
     comp_radec_dict = {comp_id: RaDec(df_comps.loc[comp_id, 'RA_deg'], df_comps.loc[comp_id, 'Dec_deg'])
                        for comp_id in df_comps.index}
     comp_apertures_dict = OrderedDict()
+    obs_id = 1
     for fo in fits_objects:
         ap_list = []
         for comp_id in df_comps.index:
             xy = fo.xy_from_radec(comp_radec_dict[comp_id])
-            raw_ap = PointSourceAp(fo.image, xy, disc_radius, gap, background_width, comp_id)
-            ap = raw_ap.recenter()
-            ap_list.append(ap)
+            # NB: fo.image_fits is (y,x) as Ap expects. Do not use .image or .image_xy which are (x,y).
+            raw_ap = PointSourceAp(fo.image_fits, xy, disc_radius, gap, background_width,
+                                   str(comp_id), str(obs_id))
+            if raw_ap.is_valid and raw_ap.all_inside_image:  # severest screen available from PointSourceAp.
+                ap = raw_ap.recenter(max_iterations=5)
+                if ap.is_valid and ap.all_inside_image:
+                    ap_list.append(ap)
+                    obs_id += 1
         comp_apertures_dict[fo.filename] = ap_list
     return comp_apertures_dict
 
@@ -398,34 +413,39 @@ def _make_df_comp_obs(comp_apertures, df_comps, instrument):
                 x1024 = instrument.x1024(ap.xy_center.x)
                 y1024 = instrument.y1024(ap.xy_center.y)
                 vignette = x1024 ** 2 + y1024 ** 2
-                any_pixel_saturated = instrument.is_saturated(ap.foreground_max)
+                any_pixel_saturated = instrument.is_saturated(ap.xy_center.x, ap.xy_center.y,
+                                                              ap.foreground_max)
                 if not any_pixel_saturated:
                     comp_obs_dict = {
                         'FITSfile': filename,
                         'SourceID': ap.source_id,
+                        'ObsID': ap.obs_id,
                         'Type': 'Comp',
                         'InstMag': -2.5 * log10(ap.net_flux),
                         'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
                         'DiscRadius': ap.foreground_radius,
-                        'FWHM': ap.fwhm,
-                        'SkyADU': ap.background_level,
                         'SkyRadiusInner': ap.foreground_radius + ap.gap,
                         'SkyRadiusOuter': ap.foreground_radius + ap.gap + ap.background_width,
+                        'FWHM': ap.fwhm,
+                        'Elongation': ap.elongation,
+                        'SkyADU': ap.background_level,
                         'SkySigma': ap.background_std,
                         'Vignette': vignette,
                         'X1024': x1024,
                         'Y1024': y1024,
-                        'Xcentroid': ap.xy_centroid.x,
-                        'Ycentroid': ap.xy_centroid.y,
+                        'Xcentroid': ap.xy_centroid[0],
+                        'Ycentroid': ap.xy_centroid[1],
                         'RA_deg': df_comps.loc[ap.source_id, 'RA_deg'],
                         'Dec_deg': df_comps.loc[ap.source_id, 'Dec_deg']}
                     comp_obs_dict_list.append(comp_obs_dict)
     df_comp_obs = pd.DataFrame(data=comp_obs_dict_list)
+    df_comp_obs.index = df_comp_obs['ObsID'].values
+    df_comp_obs = df_comp_obs.sort_values(by='ObsID', key=lambda ids: ids.astype('int64'))
     return df_comp_obs
 
 
 def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
-                       disc_radius, gap, background_width, log_file):
+                       disc_radius, gap, background_width, log_file, starting_obs_id):
     """ Make mp_apertures, one row per MP (thus one row per FITS file).
     :param fits_object_dict:
     :param mp_string:
@@ -434,12 +454,14 @@ def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
     :param gap:
     :param background_width:
     :param log_file:
+    :param starting_obs_id: [int]
     :return:
     """
     utc0, ra0, dec0, ra_per_second, dec_per_second = \
         calc_mp_motion(session_dict, fits_object_dict, log_file)
     mp_apertures_dict = OrderedDict()
     mp_mid_radec_dict = OrderedDict()
+    obs_id = starting_obs_id
     for filename, fo in fits_object_dict.items():
         dt_start = (fo.utc_start - utc0).total_seconds()
         dt_end = dt_start + fo.exposure
@@ -449,12 +471,17 @@ def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
         dec_end = dec0 + dt_end * dec_per_second
         xy_start = fo.xy_from_radec(RaDec(ra_start, dec_start))
         xy_end = fo.xy_from_radec(RaDec(ra_end, dec_end))
-        ap = MovingSourceAp(fo.image, xy_start, xy_end, disc_radius, gap, background_width,
-                            source_id=mp_string)
-        mp_apertures_dict[fo.filename] = ap
-        ra_mid = (ra_start + ra_end) / 2
-        dec_mid = (dec_start + dec_end) / 2
-        mp_mid_radec_dict[filename] = RaDec(ra_mid, dec_mid)
+        # NB: fo.image_fits is (y,x) as Ap expects. Do not use .image or .image_xy which are (x,y).
+        raw_ap = MovingSourceAp(fo.image_fits, xy_start, xy_end, disc_radius, gap, background_width,
+                                source_id=mp_string, obs_id=str(obs_id))
+        if raw_ap.is_valid and raw_ap.all_inside_image:  # severest screen available from PointSourceAp.
+            ap = raw_ap.recenter(max_iterations=5)
+            if ap.is_valid and ap.all_inside_image:
+                mp_apertures_dict[fo.filename] = ap
+                ra_mid = (ra_start + ra_end) / 2
+                dec_mid = (dec_start + dec_end) / 2
+                mp_mid_radec_dict[filename] = RaDec(ra_mid, dec_mid)
+                obs_id += 1
     return mp_apertures_dict, mp_mid_radec_dict
 
 
@@ -466,7 +493,8 @@ def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
             x1024 = instrument.x1024(ap.xy_center.x)
             y1024 = instrument.y1024(ap.xy_center.y)
             vignette = x1024 ** 2 + y1024 ** 2
-            any_pixel_saturated = instrument.is_saturated(ap.foreground_max)
+            any_pixel_saturated = instrument.is_saturated(ap.xy_center.x, ap.xy_center.y,
+                                                          ap.foreground_max)
             if not any_pixel_saturated:
                 mp_obs_dict = {
                     'FITSfile': filename,
@@ -474,17 +502,18 @@ def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
                     'Type': 'MP',
                     'InstMag': -2.5 * log10(ap.net_flux),
                     'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
-                    'DiscRadius': ap.foreground_radius,
-                    'FWHM': ap.fwhm,
                     'SkyADU': ap.background_level,
+                    'SkySigma': ap.background_std,
+                    'DiscRadius': ap.foreground_radius,
                     'SkyRadiusInner': ap.foreground_radius + ap.gap,
                     'SkyRadiusOuter': ap.foreground_radius + ap.gap + ap.background_width,
-                    'SkySigma': ap.background_std,
+                    'FWHM': ap.fwhm,
+                    'Elongation': ap.elongation,
                     'Vignette': vignette,
                     'X1024': x1024,
                     'Y1024': y1024,
-                    'Xcentroid': ap.xy_centroid.x,
-                    'Ycentroid': ap.xy_centroid.y,
+                    'Xcentroid': ap.xy_centroid[0],
+                    'Ycentroid': ap.xy_centroid[1],
                     'Xstart': ap.xy_start.x,
                     'Ystart': ap.xy_start.y,
                     'Xend': ap.xy_end.x,
@@ -506,36 +535,36 @@ def _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_m
 
 
 def _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images):
-    observer = Observer(longitude=site_dict['longitude'],
-                        latitude=site_dict['latitude'],
-                        elevation=site_dict['elevation'])
-    df_comp_obs['ObsAirmass'] = df_comp_obs['Airmass'].copy()
+    observer = Observer(longitude=site_dict['longitude'] * u.deg,
+                        latitude=site_dict['latitude'] * u.deg,
+                        elevation=site_dict['elevation'] * u.m)
+    df_comp_obs['ObsAirmass'] = None
     skycoord_dict = {comp_id: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
                      for (comp_id, ra_deg, dec_deg)
                      in zip(df_comps.index, df_comps['RA_deg'], df_comps['Dec_deg'])}
     altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
                         for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
-    for obs in df_comp_obs.index:
-        filename = df_comp_obs.loc[obs, 'FITSfile']
-        alt = skycoord_dict[obs].transform_to(altaz_frame_dict[filename]).alt.value
+    for obs, filename, comp_id in zip(df_comp_obs.index, df_comp_obs['FITSfile'], df_comp_obs['SourceID']):
+        alt = skycoord_dict[comp_id].transform_to(altaz_frame_dict[filename]).alt.value
         df_comp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+    print('ObsAirmasses written to df_comp_obs:', str(len(df_comp_obs)))
 
 
 def _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
-    observer = Observer(longitude=site_dict['longitude'],
-                        latitude=site_dict['latitude'],
-                        elevation=site_dict['elevation'])
-    df_mp_obs['ObsAirmass'] = df_mp_obs['Airmass'].copy()
+    observer = Observer(longitude=site_dict['longitude'] * u.deg,
+                        latitude=site_dict['latitude'] * u.deg,
+                        elevation=site_dict['elevation'] * u.m)
+    df_mp_obs['ObsAirmass'] = None
     skycoord_dict = {filename: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
                      for (filename, ra_deg, dec_deg) in zip(df_mp_obs['FITSfile'],
                                                             df_mp_obs['RA_deg_mid'],
                                                             df_mp_obs['Dec_deg_mid'])}
     altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
                         for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
-    for obs in df_mp_obs.index:
-        filename = df_mp_obs.loc[obs, 'FITSfile']
+    for obs, filename in zip(df_mp_obs.index, df_mp_obs['FITSfile']):
         alt = skycoord_dict[filename].transform_to(altaz_frame_dict[filename]).alt.value
         df_mp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+    print('ObsAirmasses written to df_mp_obs:', str(len(df_mp_obs)))
 
 
 _____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
@@ -625,26 +654,30 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         '[Ini Template]',
         'Filename = session.template',
         '']
-    bulldozer_lines = [
-        '[Bulldozer]',
-        '# At least 3 ref star XY, one per line, all from one FITS only if at all possible:',
-        'Ref Star XY = ' + filename_earliest + ' 000.0  000.0',
-        '              ' + filename_earliest + ' 000.0  000.0',
-        '              ' + filename_earliest + ' 000.0  000.0',
+    mp_location_lines = [
         '# Exactly 2 MP XY, one per line (typically earliest and latest FITS):',
         'MP XY = ' + filename_earliest + ' 000.0  000.0',
         '        ' + filename_latest + ' 000.0  000.0',
         '']
+    # bulldozer_lines = [
+    #     '[Bulldozer]',
+    #     '# At least 3 ref star XY, one per line, all from one FITS only if at all possible:',
+    #     'Ref Star XY = ' + filename_earliest + ' 000.0  000.0',
+    #     '              ' + filename_earliest + ' 000.0  000.0',
+    #     '              ' + filename_earliest + ' 000.0  000.0',
+    #     '']
     selection_criteria_lines = [
         '[Selection Criteria]',
         'Omit Comps =',
         'Omit Obs =',
+        '# One image only per line, with or without .fts:',
         'Omit Images =',
         'Min Catalog r mag = 10.0',
         'Max Catalog r mag = 16.0',
-        'Max Catalog dr mmag = 15.0',
-        'Min Catalog ri color = 0.04',
-        'Max Catalog ri color = 0.40',
+        'Max Catalog dr mmag = 16.0',
+        'Max Catalog di mmag = 16.0',
+        'Min Catalog ri color = 0.00',
+        'Max Catalog ri color = 0.44',
         '']
     regression_lines = [
         '[Regression]',
@@ -656,7 +689,7 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'Fit Vignette = Yes',
         'Fit XY = No',
         'Fit JD = Yes']
-    raw_lines = header_lines + ini_lines + bulldozer_lines + selection_criteria_lines + regression_lines
+    raw_lines = header_lines + ini_lines + mp_location_lines + selection_criteria_lines + regression_lines
     ready_lines = [line + '\n' for line in raw_lines]
     if not os.path.exists(fullpath):
         with open(fullpath, 'w') as f:
@@ -673,7 +706,7 @@ def _session_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
         return
     this_directory, mp_string, an_string, filter_string = context
     defaults_dict = ini.make_defaults_dict()
-    session_dict = ini.make_session_dict()
+    session_dict = ini.make_session_dict(defaults_dict, this_directory)
     log_filename = defaults_dict['session log filename']
     log_file = open(log_filename, mode='a')  # set up append to log file.
     log_file.write('\n===== ' + calling_function_name + '()  ' +
@@ -681,25 +714,23 @@ def _session_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     return context, defaults_dict, session_dict, log_file
 
 
-def screen_comps_for_photometry(refcat2, session_dict):
-    """ Applies ATLAS refcat2 screens to refcat2 object IN-PLACE. Returns info text.
+def initial_screen_comps(refcat2):
+    """ Screen ATLAS refcat2 stars for quality before aperture photometry.
+        This is a wide selection, to be tightened during regression (do_phot()).
+        Screens are performed IN-PLACE on refcat2 catalog object. Returns text lines documenting progress.
     :param refcat2: ATLAS refcat2 catalog from astropak.catalog.py. [Refcat2 object]
-    :param session_dict:
     :return info: text documenting actions taken. [list of strings]
     """
     info = []
-    refcat2.select_min_r_mag(session_dict['min catalog r mag'])
-    info.append('Refcat2: min(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_max_r_mag(session_dict['max catalog r mag'])
-    info.append('Refcat2: max(g) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_max_g_uncert(session_dict['max catalog dg mmag'])
-    info.append('Refcat2: max(dg) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_max_r_uncert(session_dict['max catalog dr mmag'])
+    refcat2.select_min_r_mag(INITIAL_MIN_R_MAG)
+    info.append('Refcat2: min(r) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_max_r_mag(INITIAL_MAX_R_MAG)
+    info.append('Refcat2: max(r) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    refcat2.select_max_r_uncert(INITIAL_MAX_DR_MMAG)
     info.append('Refcat2: max(dr) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_max_i_uncert(session_dict['max catalog di mmag'])
+    refcat2.select_max_i_uncert(INITIAL_MAX_DI_MMAG)
     info.append('Refcat2: max(di) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_sloan_ri_color(session_dict['min catalog ri color'],
-                                  session_dict['max catalog ri color'])
+    refcat2.select_sloan_ri_color(INITIAL_MIN_RI_COLOR, INITIAL_MAX_RI_COLOR)
     info.append('Refcat2: Sloan ri color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.remove_overlapping()
     info.append('Refcat2: overlaps removed to ' + str(len(refcat2.df_selected)) + ' stars.')
@@ -770,7 +801,7 @@ def _write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
     fullpath_df_comp_obs = os.path.join(this_directory, filename_df_comp_obs)
     df_comp_obs.to_csv(fullpath_df_comp_obs, sep=';', quotechar='"',
                        quoting=2, index=True)  # quoting=2 means quotes around non-numerics.
-    print('comp observations written to', fullpath_df_comp_obs)
+    print('comp star observations written to', fullpath_df_comp_obs)
     log_file.write(filename_df_comp_obs + ' written: '
                    + str(len(df_comp_obs)) + ' comp star observations.\n')
 
