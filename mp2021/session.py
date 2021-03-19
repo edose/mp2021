@@ -21,6 +21,7 @@ import astropy.units as u
 from astroplan import Observer
 import numpy as np
 import pandas as pd
+import statsmodels.formula.api as smf
 
 # Author's packages:
 import mp2021.util as util
@@ -29,6 +30,7 @@ from astropak.image import FITS, aggregate_bounding_ra_dec, PointSourceAp, Movin
 from astropak.catalogs import Refcat2
 from astropak.util import RaDec, jd_from_datetime_utc
 from astropak.reference import DEGREES_PER_RADIAN
+from astropak.stats import MixedModelFit
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,7 +55,11 @@ class SessionLogFileError(Exception):
 
 
 class SessionDataError(Exception):
-    """ Raised on any fatal problem with data, esp. with contents of FITS files."""
+    """ Raised on any fatal problem with data, esp. with contents of FITS files or missing data."""
+
+
+class SessionSpecificationError(Exception):
+    """ Raised on any fatal problem in specifying the session or processing, esp. in _make_df_all(). """
 
 
 def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
@@ -326,13 +332,14 @@ def make_dfs():
     # Make MP apertures and MP obs dataframe:
     mp_apertures_dict, mp_mid_radec_dict = _make_mp_apertures(fits_object_dict, mp_string, session_dict,
                                                               disc_radius, gap, background_width, log_file,
-                                                              starting_obs_id=len(df_comp_obs))
+                                                              starting_obs_id=len(df_comp_obs) + 2)
     df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument)
 
     # Post-process dataframes:
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
     _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
     _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
+    _add_ri_color_df_comp_obs(df_comp_obs)
 
     # Write dataframes to CSV files:
     _write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
@@ -346,7 +353,42 @@ def make_dfs():
           '\n      (2) run do_mp_phot()\n')
 
 
-_____APERTURES_and_DATAFRAMES_____________________________________________ = 0
+def do_session():
+    """ Primary lightcurve photometry for one session. Takes all data incl. color index, generates:
+    Takes the 4 CSV files from make_dfs().
+    Generates:
+    * diagnostic plots for iterative regression refinement,
+    * results in Canopus-import format,
+    * ALCDEF-format file.
+    Typically iterated, pruning comp-star ranges and outliers, until converged and then simply stop.
+    NB: One may choose the FITS files by filter (typically 'Clear' or 'BB'), but
+        * output lightcurve passband is fixed as Sloan 'r', and
+        * color index is fixed as Sloan (r-i).
+    :returns None. Writes all info to files.
+    USAGE: do_mp_phot()   [no return value]
+    """
+    context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
+    this_directory, mp_string, an_string, filter_string = context
+    log_filename = defaults_dict['session log filename']
+    log_file = open(log_filename, mode='a')
+    mp_int = int(mp_string)  # put this in try/catch block.
+    mp_string = str(mp_int)
+    log_file.write('\n===== do_session(' + filter_string + ')  ' +
+                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+
+    df_comp_master, df_mp_master = _make_df_masters(filters_to_include=filter_string,
+                                                    require_mp_obs_each_image=True)
+    df_model = _make_df_model(df_comp_master)  # comps only.
+    df_model = _mark_user_selections(df_model, session_dict)
+    model = SessionModel(df_model, filter_string, session_dict, df_mp_master, this_directory)
+
+    _write_mpfile_line(mp_string, an_string, model)
+    _write_canopus_file(model)
+    _write_alcdef_file(model, session_dict)
+    _make_session_diagnostic_plots(model, df_model, session_dict)
+
+
+_____SUPPORT_for_make_dfs_____________________________________________ = 0
 
 
 def _make_df_images(fits_objects):
@@ -379,7 +421,6 @@ def _make_df_comps(refcat2):
     comp_ids = [str(i + 1) for i in range(len(df_comps))]
     df_comps.index = comp_ids
     df_comps.insert(0, 'CompID', comp_ids)
-    print('df_comps:', str(len(df_comps)), 'comps retained.')
     return df_comps
 
 
@@ -418,7 +459,7 @@ def _make_df_comp_obs(comp_apertures, df_comps, instrument):
                 if not any_pixel_saturated:
                     comp_obs_dict = {
                         'FITSfile': filename,
-                        'SourceID': ap.source_id,
+                        'CompID': ap.source_id,
                         'ObsID': ap.obs_id,
                         'Type': 'Comp',
                         'InstMag': -2.5 * log10(ap.net_flux),
@@ -498,7 +539,8 @@ def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
             if not any_pixel_saturated:
                 mp_obs_dict = {
                     'FITSfile': filename,
-                    'SourceID': ap.source_id,
+                    'MP_ID': 'MP_' + ap.source_id,
+                    'ObsID': ap.obs_id,
                     'Type': 'MP',
                     'InstMag': -2.5 * log10(ap.net_flux),
                     'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
@@ -522,6 +564,8 @@ def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
                     'Dec_deg_mid': mp_mid_radec_dict[filename].dec}
                 mp_obs_dict_list.append(mp_obs_dict)
     df_mp_obs = pd.DataFrame(data=mp_obs_dict_list)
+    df_mp_obs.index = df_mp_obs['FITSfile'].values
+    df_mp_obs = df_mp_obs.sort_values(by='ObsID', key=lambda ids: ids.astype('int64'))
     return df_mp_obs
 
 
@@ -544,7 +588,7 @@ def _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images):
                      in zip(df_comps.index, df_comps['RA_deg'], df_comps['Dec_deg'])}
     altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
                         for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
-    for obs, filename, comp_id in zip(df_comp_obs.index, df_comp_obs['FITSfile'], df_comp_obs['SourceID']):
+    for obs, filename, comp_id in zip(df_comp_obs.index, df_comp_obs['FITSfile'], df_comp_obs['CompID']):
         alt = skycoord_dict[comp_id].transform_to(altaz_frame_dict[filename]).alt.value
         df_comp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
     print('ObsAirmasses written to df_comp_obs:', str(len(df_comp_obs)))
@@ -565,6 +609,262 @@ def _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
         alt = skycoord_dict[filename].transform_to(altaz_frame_dict[filename]).alt.value
         df_mp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
     print('ObsAirmasses written to df_mp_obs:', str(len(df_mp_obs)))
+
+
+def _add_ri_color_df_comp_obs(df_comp_obs):
+    df_comp_obs['ri_color'] = df_comp_obs['r'] - df_comp_obs['i']
+
+
+
+_____SUPPORT_for_do_session______________________________________________ = 0
+
+
+def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
+    """ Get, screen and merge dataframes df_images_all, df_comps_all, df_comp_obs_all, and df_mp_obs_all
+        into two master dataframes dataframe df_comp_master and df_mp_master.
+    :param filters_to_include: either one filter name, or a list of filters.
+               Only observations in that filter or filters will be retained.
+               None includes ALL filters given in input dataframes [None, or string, or list of strings]
+    :param require_mp_obs_each_image: True to remove all obs from images without MP observation. [boolean]
+    :return: df_comp_master, df_mp_master, the two master tables of data, one row per retained observation.
+                 [2-tuple of pandas DataFrames]
+"""
+    if isinstance(filters_to_include, str):
+        filters_to_include = [filters_to_include]
+    context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
+    this_directory, mp_string, an_string, filter_string = context
+
+    df_images_all = _read_session_csv(this_directory, session_dict['df_images filename'])
+    df_comps_all = _read_session_csv(this_directory, session_dict['df_comps filename'])
+    df_comp_obs_all = _read_session_csv(this_directory, session_dict['df_comp_obs filename'])
+    df_mp_obs_all = _read_session_csv(this_directory, session_dict['df_mp_obs filename'])
+
+    # Keep only rows in specified filters:
+    image_rows_to_keep = df_images_all['Filter'].isin(filters_to_include)
+    df_images = df_images_all.loc[image_rows_to_keep, :]
+    if len(df_images) <= 0:
+        raise SessionDataError('No images found in specified filter(s): ' + str(filters_to_include))
+    comp_obs_rows_to_keep = df_comp_obs_all['FITSfile'].isin(df_images['FITSfile'])
+    df_comp_obs = df_comp_obs_all.loc[comp_obs_rows_to_keep, :]
+    if len(df_comp_obs) <= 0:
+        raise SessionDataError('No comp obs found in specified filters(s)' + str(filters_to_include))
+    mp_obs_rows_to_keep = df_mp_obs_all['FITSfile'].isin(df_images['FITSfile'])
+    df_mp_obs = df_mp_obs_all.loc[mp_obs_rows_to_keep, :]
+    if len(df_mp_obs) <= 0:
+        raise SessionDataError('No MP obs found in specified filters(s)' + str(filters_to_include))
+
+    # Remove images and all obs from images having no MP obs, if requested:
+    if require_mp_obs_each_image:
+        images_with_mp_obs = df_mp_obs['FITSfile'].drop_duplicates()
+        image_rows_to_keep = df_images_all['FITSfile'].isin(images_with_mp_obs)
+        df_images = df_images_all.loc[image_rows_to_keep, :]
+        comp_obs_rows_to_keep = df_comp_obs_all['FITSfile'].isin(images_with_mp_obs)
+        df_comp_obs = df_comp_obs_all.loc[comp_obs_rows_to_keep, :]
+        mp_obs_rows_to_keep = df_mp_obs_all['FITSfile'].isin(images_with_mp_obs)
+        df_mp_obs = df_mp_obs_all.loc[mp_obs_rows_to_keep, :]
+
+    # Perform merges to produce master dataframes:
+    df_comp_obs = pd.merge(left=df_comp_obs, right=df_images, how='left', on='FITSfile')
+    df_comp_master = pd.merge(left=df_comp_obs, right=df_comps_all, how='left', on='CompID')
+    df_comp_master.index = df_comp_master['CompID'].values
+    df_mp_master = pd.merge(left=df_mp_obs, right=df_images, how='left', on='FITSfile')
+    df_mp_master.index = df_mp_master['MP_ID'].values
+
+    return df_comp_master, df_mp_master
+
+
+def _read_session_csv(this_directory, session_dict, filename):
+    """ Simple utility to read specified CSV file into a pandas Dataframe. """
+    fullpath = os.path.join(this_directory, filename)
+    return pd.read_csv(fullpath, sep=';', index_col=0)
+
+
+def _make_df_model(df_comp_master):
+    """ Assemble and return df_model, the comp-only dataframe containing all input data need for the
+        mixed-model regression at the center of this lightcurve workflow.
+        Keep only comps that are present in every image.
+    :param df_comp_master:
+    :return: df_model, one row per comp observation [pandas Dataframe]
+    """
+    # Count comp obs in each image:
+    comp_id_list = df_comp_master['CompID'].drop_duplicates()
+    image_count = len(df_comp_master['FITSfile'].drop_duplicates())
+    comp_obs_count_each_image = df_comp_master.groupby('CompID')[['FITSfile', 'CompID']].count()
+    comp_ids_in_every_image = [id for id in comp_id_list
+                               if comp_obs_count_each_image[id, 'FITSfile'] == image_count]
+    rows_with_qualified_comp_ids = df_comp_master['CompID'].isin(comp_ids_in_every_image)
+    df_model = df_comp_master[rows_with_qualified_comp_ids]
+    return df_model
+
+
+def _mark_user_selections(df_model, session_dict):
+    """ Add UseInModel column to df_model, to be True for each row iff row (obs) passes all user criteria
+        allowing it to be actually used in constructing the mixed-model.
+    :param df_model: [pandas DataFrame]
+    :return: df_model with new UseInModel column. [pandas DataFrame]
+    """
+    deselect_for_obs_id = df_model['ObsID'].isin(session_dict['omit obs'])
+    deselect_for_comp_id = df_model['CompID'].isin(session_dict['omit comps'])
+    images_to_omit = session_dict['omit images'] + [name + '.fts' for name in session_dict['omit images']]
+    deselect_for_image = df_model['FITSfile'].isin(images_to_omit)
+    deselect_for_low_r_mag = (df_model['r'] < session_dict['min catalog r mag'])
+    deselect_for_high_r_mag = (df_model['r'] > session_dict['max catalog r mag'])
+    deselect_for_high_dr_mmag = (df_model['dr'] > session_dict['max catalog dr mmag'])
+    deselect_for_high_di_mmag = (df_model['di'] > session_dict['max catalog di mmag'])
+    deselect_for_low_ri_color = (df_model['ri_color'] < session_dict['min catalog ri color'])
+    deselect_for_high_ri_color = (df_model['ri_color'] > session_dict['max catalog ri color'])
+    obs_to_deselect = pd.Series(deselect_for_obs_id | deselect_for_comp_id | deselect_for_image
+                                | deselect_for_low_r_mag | deselect_for_high_r_mag
+                                | deselect_for_high_dr_mmag | deselect_for_high_di_mmag
+                                | deselect_for_low_ri_color | deselect_for_high_ri_color)
+    df_model['UseInModel'] = ~ obs_to_deselect
+    return df_model
+
+
+class SessionModel:
+    """ Generates and holds mixed-model regression model, affords prediction for MP magnitudes. """
+    def __init__(self, df_model, filter_string, session_dict, df_mp_master, this_directory):
+        self.df_model = df_model
+        self.filter_string = filter_string
+        self.session_dict = session_dict
+        self.df_used_comps_obs = self.df_model.copy().loc[self.df_model['UseInModel'], :]
+        images_in_used_comps = self.df_used_comps_obs['FITSfile'].drop_duplicates()
+        mp_rows_to_use = df_mp_master['FITSfile'].isin(images_in_used_comps)
+        self.df_used_mp_obs = df_mp_master.loc[mp_rows_to_use, :]
+        self.this_directory = this_directory
+
+        self.dep_var_name = 'InstMag_with_offsets'
+        self.mm_fit = None      # placeholder for the fit result [MixedModelFit object].
+        self.transform = None   # placeholder for this fit parameter result [scalar].
+        self.transform_fixed = None  # "
+        self.extinction = None  # "
+        self.vignette = None    # "
+        self.x = None           # "
+        self.y = None           # "
+        self.jd1 = None         # "
+
+        self._prep_and_do_regression()
+        self.df_mp_mags = self._calc_mp_mags()
+
+    def _prep_and_do_regression(self):
+        """ Using MixedModelFit class (which wraps statsmodels.MixedLM.from_formula()).
+            Use ONLY selected comp data in the model itself.
+            Use model's .predict() to calculate best MP mags from model and MP observations.
+        :return: [None]
+        """
+        fit_summary_lines = []
+        dep_var_offset = self.df_used_comps_obs['r'].copy()
+        fixed_effect_var_list = []
+
+        # Handle transform (Color Index) option:
+        # Options: ('fit', '1'), ('fit', '2'), ('use', [Tr1]), ('use', [Tr1], [Tr2]).
+        self.df_used_comps_obs['CI'] = self.df_used_comps_obs['ri']
+        self.df_used_comps_obs['CI2'] = [ci ** 2 for ci in self.df_used_comps_obs['CI']]
+        transform_option = self.session_dict['fit transform']
+        if transform_option == ('fit', '1'):
+            fixed_effect_var_list.append('CI')
+        elif transform_option == ('fit', '2'):
+            fixed_effect_var_list.extend(['CI', 'CI2'])
+        elif transform_option[0] == 'use':
+            if len(transform_option) == 2:
+                transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI']
+            elif len(transform_option) == 3:
+                transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI'] +\
+                                   float(transform_option[2]) * self.df_used_comps_obs['CI2']
+            else:
+                raise SessionSpecificationError('Invalid \'Fit Transform\' option in session.ini')
+            dep_var_offset += transform_offset
+        else:
+            raise SessionSpecificationError('Invalid \'Fit Transform\' option in session.ini')
+
+        # Handle extinction (ObsAirmass) option:
+        # Option chosen from: 'yes', ('use', [ext]).
+        extinction_option = self.session_dict['fit extinction']
+        if extinction_option == 'yes':
+            fixed_effect_var_list.append('ObsAirmass')
+        elif isinstance(extinction_option, tuple) and len(extinction_option) == 2 and \
+            (extinction_option[0] == 'use'):
+            extinction_offset = float(extinction_option[1]) * self.df_used_comps_obs['ObsAIrmass']
+            dep_var_offset += extinction_offset
+        else:
+            raise SessionSpecificationError('Invalid \'Fit Extinction\' option in session.ini')
+
+        # Build all other fixed-effect (x) variable lists and dep-var offsets:
+        if self.session_dict['fit vignette']:
+            fixed_effect_var_list.append('Vignette')
+        if self.session_dict['fit xy']:
+            fixed_effect_var_list.extend(['X1024', 'Y1024'])
+        if self.session_dict['fit jd']:
+            fixed_effect_var_list.append('JD_fract')
+        if len(fixed_effect_var_list) == 0:
+            fixed_effect_var_list = ['JD_fract']  # as statsmodels requires >= 1 fixed-effect variable.
+
+        # Build 'random-effect' and dependent (y) variables:
+        random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
+        self.df_used_comps_obs[self.dep_var_name] = self.df_used_comps_obs['InstMag'] - dep_var_offset
+
+        # Execute regression:
+        import warnings
+        from statsmodels.tools.sm_exceptions import ConvergenceWarning
+        warnings.simplefilter('ignore', ConvergenceWarning)
+        self.mm_fit = MixedModelFit(data=self.df_used_comps_obs,
+                                    dep_var=self.dep_var_name,
+                                    fixed_vars=fixed_effect_var_list,
+                                    group_var=random_effect_var_name)
+        print(self.mm_fit.statsmodels_object.summary())
+        print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
+        if not self.mm_fit.converged:
+            msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
+            print(msg)
+            fit_summary_lines.append(msg)
+        write_text_file(self.this_directory, 'fit_summary.txt',
+                        'Regression for directory ' + self.this_directory + '\n\n' +
+                        '\n'.join(fit_summary_lines) +
+                        self.mm_fit.statsmodels_object.summary().as_text() +
+                        '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
+
+
+    def _calc_mp_mags(self):
+        """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
+        bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
+        self.df_used_mp_obs['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
+        best_mp_ri_color = self.session_dict['mp ri color']
+        self.df_used_mp_obs['CI'] = best_mp_ri_color
+        self.df_used_mp_obs['CI2'] = best_mp_ri_color ** 2
+        raw_predictions = self.mm_fit.predict(self.df_used_mp_obs, include_random_effect=True)
+        dep_var_offset = pd.Series(len(self.df_used_mp_obs) * [0.0], index=raw_predictions.index)
+
+        # Handle transform offsets for MPs:
+        transform_option = self.session_dict['fit transform']
+        if transform_option[0] == 'use':
+            if len(transform_option) == 2:
+                transform_offset = float(transform_option[1]) * self.df_used_mp_obs['CI']
+            else:  # len(transform_option) == 3 (as previously vetted).
+                transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI'] + \
+                                   float(transform_option[2]) * self.df_used_comps_obs['CI2']
+            dep_var_offset += transform_offset
+
+        # Handle extinction offsets for MPs:
+        extinction_option = self.session_dict['fit extinction']
+        if isinstance(extinction_option, tuple):  # will be ('use', [ext]), as previously vetted.
+            extinction_offset = float(extinction_option[1]) * self.df_used_comps_obs['ObsAIrmass']
+            dep_var_offset += extinction_offset
+
+        # Calculate best MP magnitudes, incl. effect of assumed bogus_cat_mag:
+        mp_mags = self.df_used_mp_obs['InstMag'] - dep_var_offset - raw_predictions + bogus_cat_mag
+        df_mp_mags = pd.DataFrame(data={'MP Mags': mp_mags}, index=list(mp_mags.index))
+        df_mp_mags = pd.merge(left=df_mp_mags,
+                              right=self.df_used_mp_obs.loc[:, ['JD_mid', 'FITSfile',
+                                                                'InstMag', 'InstMagSigma']],
+                              how='left', left_index=True, right_index=True, sort=False)
+        return df_mp_mags
+
+
+def _write_mpfile_line(mp_string, an_string, model):
+    model_jds = model.df_mp_mags['JD_mid']
+    print(' >>>>> Please add this line to MPfile', mp_string + ':',
+          '  #OBS', '{0:.5f}'.format(model_jds.min()), ' {0:.5f}'.format(model_jds.max()),
+          ' ;', an_string, '::', mp_string)
 
 
 _____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
@@ -682,6 +982,7 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
     regression_lines = [
         '[Regression]',
         'MP ri color = +0.220',
+        'MP ri color origin = Default MP color'
         '# Fit Transform, one of: Fit=1, Fit=2, Use [val1], Use [val1] [val2]:',
         'Fit Transform = Use +0.4 -0.6',
         '# Fit Extinction, one of: Yes, Use [val]:',
@@ -813,3 +1114,9 @@ def _write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file):
                      quoting=2, index=True)  # quoting=2 means quotes around non-numerics.
     print('MP observations written to', fullpath_df_mp_obs)
     log_file.write(filename_df_mp_obs + ' written: ' + str(len(df_mp_obs)) + ' MP observations.\n')
+
+
+def write_text_file(this_directory, filename, lines):
+    fullpath = os.path.join(this_directory, filename)
+    with open(fullpath, 'w') as f:
+        f.write(lines)

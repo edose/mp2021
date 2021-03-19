@@ -18,6 +18,7 @@ Max Catalog ri color = float -> max catalog ri color
 
 [Regression]
 MP ri Color    = float -> mp ri color
+MP ri Color Origin = string -> mp ri color origin
 Fit Transform  = string -> fit transform
 Fit Extinction = string -> fit extinction
 Fit Vignette   = boolean -> fit vignette

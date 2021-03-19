@@ -141,8 +141,8 @@ def make_session_dict(defaults_dict, session_directory):
         'min catalog ri color': 0.10,
         'max catalog ri color': 0.34,
         'mp ri color': +0.22,
-        'fit transform': ('Use', '+0.4', '-0.16'), or ('Use', '+0.4'), ('Fit', '1'), ('Fit', '2').
-        'fit extinction': (Use', '+0.16'), or 'Yes' to fit extinction.
+        'fit transform': ('use', '+0.4', '-0.16'), or ('use', '+0.4'), ('fit', '1'), ('fit', '2').
+        'fit extinction': (use', '+0.16'), or 'yes' to fit extinction.
         'fit vignette': True,
         'fit xy': False,
         'fit jd': True }
