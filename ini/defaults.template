@@ -22,4 +22,6 @@ Color Top Directory     = string -> color top directory
 Color Control Filename  = string -> color control filename
 Color Log Filename      = string -> color log filename
 Color image prefix      = string -> color image prefix
-# ... and probably more to add later...
+
+[Other]
+MPfile directory   = string -> mpfile directory

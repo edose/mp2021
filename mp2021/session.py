@@ -28,7 +28,7 @@ import mp2021.util as util
 import mp2021.ini as ini
 from astropak.image import FITS, aggregate_bounding_ra_dec, PointSourceAp, MovingSourceAp
 from astropak.catalogs import Refcat2
-from astropak.util import RaDec, jd_from_datetime_utc
+from astropak.util import RaDec, jd_from_datetime_utc, datetime_utc_from_jd, ra_as_hours, dec_as_hex
 from astropak.reference import DEGREES_PER_RADIAN
 from astropak.stats import MixedModelFit
 
@@ -44,6 +44,12 @@ INITIAL_MAX_DR_MMAG = 20
 INITIAL_MAX_DI_MMAG = 20
 INITIAL_MIN_RI_COLOR = 0.0
 INITIAL_MAX_RI_COLOR = 0.44
+
+ALCDEF_BASE_DATA = {'contactname': 'Eric V. Dose',
+                    'contactinfo': 'MP@ericdose.com',
+                    'observers': 'Dose, E.V.',
+                    'filter': 'C',
+                    'magband': 'SR'}
 
 
 class SessionIniFileError(Exception):
@@ -373,6 +379,7 @@ def do_session():
     log_file = open(log_filename, mode='a')
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
+    site_dict = ini.make_site_dict(defaults_dict)
     log_file.write('\n===== do_session(' + filter_string + ')  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
@@ -383,8 +390,8 @@ def do_session():
     model = SessionModel(df_model, filter_string, session_dict, df_mp_master, this_directory)
 
     _write_mpfile_line(mp_string, an_string, model)
-    _write_canopus_file(model)
-    _write_alcdef_file(model, session_dict)
+    _write_canopus_file(mp_string, an_string, this_directory, model)
+    _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_directory, model)
     _make_session_diagnostic_plots(model, df_model, session_dict)
 
 
@@ -861,10 +868,102 @@ class SessionModel:
 
 
 def _write_mpfile_line(mp_string, an_string, model):
+    """ Write to console one line for this session. (Paste line into this MP campaign's MPfile.) """
     model_jds = model.df_mp_mags['JD_mid']
     print(' >>>>> Please add this line to MPfile', mp_string + ':',
           '  #OBS', '{0:.5f}'.format(model_jds.min()), ' {0:.5f}'.format(model_jds.max()),
           ' ;', an_string, '::', mp_string)
+
+
+def _write_canopus_file(mp_string, an_string, this_directory, model):
+    """ Write MP results in format that can be imported directly into Canopus. """
+    df = model.df_mp_mags
+    fulltext = '\n'.join([','.join(['{0:.6f}'.format(jd), '{0:.4f}'.format(mag), '{0:.4f}'.format(s), f])
+                          for (jd, mag, s, f) in zip(df['JD_mid'], df['MP_Mags'],
+                                                     df['InstMagSigma'], df['FITSfile'])])
+    fullpath = os.path.join(this_directory, 'canopus_MP_' + mp_string + '_' + an_string + '.txt')
+    with open(fullpath, 'w') as f:
+        f.write(fulltext)
+
+
+def _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_directory, model):
+    mpfile_names = util.get_mp_filenames(this_directory)
+    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string)]
+    if len(name_list) <= 0:
+        print(' >>>>> WARNING: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')
+        return
+    if len(name_list) >= 2:
+        print(' >>>>> WARNING: Multiple MPfiles were found for MP', mp_string, '--> NO ALCDEF file written')
+        return
+    mpfile = util.MPfile(name_list[0])
+    df = model.df_mp_mags
+
+    # Build data that will go into file:
+    lines = list()
+    lines.append('# ALCDEF file for MP ' + mp_string + '  AN ' + an_string)
+    lines.append('STARTMETADATA')
+    lines.append('REVISEDDATA=FALSE')
+    lines.append('OBJECTNUMBER=' + mp_string)
+    lines.append('OBJECTNAME=' + mpfile.name)
+    lines.append('ALLOWSHARING=TRUE')
+    # lines.append('MPCDESIG=')
+    lines.append('CONTACTNAME=' + ALCDEF_BASE_DATA['contactname'])
+    lines.append('CONTACTINFO=' + ALCDEF_BASE_DATA['contactinfo'])
+    lines.append('OBSERVERS=' + ALCDEF_BASE_DATA['observers'])
+    lines.append('OBSLONGITUDE=' + '{0:.4f}'.format(site_dict['longitude']))
+    lines.append('OBSLATITUDE=' + '{0:.4f}'.format(site_dict['latitude']))
+    lines.append('FACILITY=' + site_dict['name'])
+    lines.append('MPCCODE=' + site_dict['mpc code'])
+    # lines.append('PUBLICATION=')
+    jd_session_start = min(df['JD_mid'])
+    jd_session_end = max(df['JD_mid'])
+    jd_session_mid = (jd_session_start + jd_session_end) / 2.0
+    utc_session_mid = datetime_utc_from_jd(jd_session_mid)  # (needed below)
+    dt_split = utc_session_mid.isoformat().split('T')
+    lines.append('SESSIONDATE=' + dt_split[0])
+    lines.append('SESSIONTIME=' + dt_split[1].split('+')[0].split('.')[0])
+    lines.append('FILTER=' + ALCDEF_BASE_DATA['filter'])
+    lines.append('MAGBAND=' + ALCDEF_BASE_DATA['magband'])
+    lines.append('LTCTYPE=NONE')
+    # lines.append('LTCDAYS=0')
+    # lines.append('LTCAPP=NONE')
+    lines.append('REDUCEDMAGS=NONE')
+    session_eph_dict = mpfile.eph_from_utc(utc_session_mid)
+    # earth_mp_au = session_eph_dict['Delta']
+    # sun_mp_au = session_eph_dict['R']
+    # reduced_mag_correction = -5.0 * log10(earth_mp_au * sun_mp_au)
+    #  lines.append('UCORMAG=' + '{0:.4f}'.format(reduced_mag_correction))  # removed to avoid confusion.
+    lines.append('OBJECTRA=' + ra_as_hours(session_eph_dict['RA']).rsplit(':', 1)[0])
+    lines.append('OBJECTDEC=' + ' '.join(dec_as_hex(round(session_eph_dict['Dec'])).split(':')[0:2]))
+    lines.append('PHASE=+' + '{0:.1f}'.format(abs(session_eph_dict['Phase'])))
+    lines.append('PABL=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_longitude'])))
+    lines.append('PABB=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_latitude'])))
+    lines.append('COMMENT=These results from submitter\'s '
+                 'ATLAS-refcat2 based workflow: see SAS Symposium 2020.')
+    lines.append('COMMENT=This session used ' +
+                 str(len(model.df_used_mp_obs['SourceID'].drop_duplicates())) +
+                 ' comp stars. COMPNAME etc lines are omitted.')
+    lines.append('CICORRECTION=TRUE')
+    lines.append('CIBAND=SRI')
+    lines.append('CITARGET=' + '{0:+.3f}'.format(session_dict['mp ri color']) +
+                 '  # origin: ' + session_dict['mp ri color origin'])
+    lines.append('DELIMITER=PIPE')
+    lines.append('ENDMETADATA')
+    data_lines = ['DATA=' + '|'.join(['{0:.6f}'.format(jd), '{0:.3f}'.format(mag), '{0:.3f}'.format(sigma)])
+                  for (jd, mag, sigma) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'])]
+    lines.extend(data_lines)
+    lines.append('ENDDATA')
+
+    # Write the file and exit:
+    fulltext = '\n'.join(lines) + '\n'
+    fullpath = os.path.join(this_directory, 'alcdef_MP_' + mp_string + '_' + an_string + '.txt')
+    with open(fullpath, 'w') as f:
+        f.write(fulltext)
+
+
+def _make_session_diagnostic_plots(model, df_model, session_dict):
+    pass
+
 
 
 _____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
