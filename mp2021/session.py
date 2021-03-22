@@ -11,7 +11,7 @@ from mp2021.util import Instrument
 import os
 from datetime import datetime, timezone
 from collections import Counter, OrderedDict
-from math import floor, log10, log, sin
+from math import floor, log10, log, sin, ceil
 
 # External packages:
 import astropy.io.fits as apyfits
@@ -21,7 +21,11 @@ import astropy.units as u
 from astroplan import Observer
 import numpy as np
 import pandas as pd
-import statsmodels.formula.api as smf
+# import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+from scipy.stats import norm
+
 
 # Author's packages:
 import mp2021.util as util
@@ -50,6 +54,7 @@ ALCDEF_BASE_DATA = {'contactname': 'Eric V. Dose',
                     'observers': 'Dose, E.V.',
                     'filter': 'C',
                     'magband': 'SR'}
+SESSION_PLOT_FILE_PREFIX = 'Image_Session_'
 
 
 class SessionIniFileError(Exception):
@@ -830,7 +835,6 @@ class SessionModel:
                         self.mm_fit.statsmodels_object.summary().as_text() +
                         '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
 
-
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
         bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
@@ -962,7 +966,425 @@ def _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_direc
 
 
 def _make_session_diagnostic_plots(model, df_model, session_dict):
-    pass
+    """  Display and write to file several diagnostic plots, to:
+         * decide which obs, comps, images might need removal by editing session.ini, and
+         * possibly adjust regression parameters, also by editing session.ini. """
+    context, defaults_dict, session_dict, log_file = _session_setup('(plots)')
+    this_directory, mp_string, an_string, filter_string = context
+
+    # Delete any previous plot files from current directory:
+    session_plot_filenames = [f for f in os.listdir('.')
+                       if f.startswith(SESSION_PLOT_FILE_PREFIX) and f.endswith('.png')]
+    for f in session_plot_filenames:
+        os.remove(f)
+
+    # Wrangle needed data into convenient forms:
+    df_plot_comp_obs = pd.merge(left=df_model.loc[df_model['UseInModel'], :].copy(),
+                                right=model.mm_fit.df_observations,
+                                how='left', left_index=True, right_index=True, sort=False)
+    df_image_effect = model.mm_fit.df_random_effects
+    df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
+    sigma = model.mm_fit.sigma
+    # (Skip value of transform for now.)
+    comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
+    n_comps = len(comp_ids)
+    jd_floor = floor(min(df_model['JD_mid']))
+    xlabel_jd = 'JD(mid)-' + str(jd_floor)
+
+    # ################ SESSION FIGURE 1: Q-Q plot of mean comp effects (1 pt per comp star used in model).
+    window_title = 'Q-Q Plot (by comp):  MP ' + mp_string + '   AN ' + an_string
+    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp (mean residual)'
+    plot_annotation = str(n_comps) + ' comps used in model.' + '\n(tags: comp SourceID)'
+    df_y = df_plot_comp_obs.loc[:, ['SourceID', 'Residual']].groupby(['SourceID']).mean()
+    df_y = df_y.sort_values(by='Residual')
+    y_data = df_y['Residual'] * 1000.0  # for millimags
+    y_labels = df_y.index.values
+    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
+                          SESSION_PLOT_FILE_PREFIX + '1_QQ_comps.png')
+
+    # ################ SESSION FIGURE 2: Q-Q plot of comp residuals (one point per comp obs).
+    window_title = 'Q-Q Plot (by comp observation):  MP ' + mp_string + '   AN ' + an_string
+    page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp observation'
+    plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' +\
+                      str(n_comps) + ' comps used in model.' + \
+                      '\n (tags: observation Serial numbers)'
+    df_y = df_plot_comp_obs.loc[:, ['Serial', 'Residual']]
+    df_y = df_y.sort_values(by='Residual')
+    y_data = df_y['Residual'] * 1000.0  # for millimags
+    y_labels = df_y['Serial'].values
+    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
+                          SESSION_PLOT_FILE_PREFIX + '2_QQ_obs.png')
+
+    # ################ SESSION FIGURE 3: Catalog and Time plots:
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15,9
+    fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+    fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     catalog and time plots',
+                 color='darkblue', fontsize=20)
+    fig.canvas.set_window_title('Catalog and Time Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+    subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+    fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+
+    # Catalog mag uncertainty plot (comps only, one point per comp, x=cat r mag, y=cat r uncertainty):
+    ax = axes[0, 0]
+    make_9_subplot(ax, 'Catalog Mag Uncertainty (dr)', 'Catalog Mag (r)', 'mMag', '', False,
+                   x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['dr'])
+
+    # Catalog color plot (comps only, one point per comp, x=cat r mag, y=cat color (r-i)):
+    ax = axes[0, 1]
+    make_9_subplot(ax, 'Catalog Color Index', 'Catalog Mag (r)', 'CI Mag', '', zero_line=False,
+                   x_data=df_plot_comp_obs['r'], y_data=(df_plot_comp_obs['r'] - df_plot_comp_obs['i']))
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=len(model.df_mp_mags) * [session_dict['mp ri color']],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Inst Mag plot (comps only, one point per obs, x=cat r mag, y=InstMagSigma):
+    ax = axes[0, 2]
+    make_9_subplot(ax, 'Instrument Magnitude Uncertainty', 'Catalog Mag (r)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['InstMagSigma'])
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=model.df_mp_mags['InstMagSigma'],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
+    ax = axes[1, 0]
+    df_this_plot = pd.merge(df_image_effect, df_plot_comp_obs.loc[:, ['FITSfile', 'JD_fract']],
+                            how='left', on='FITSfile', sort=False).drop_duplicates()
+    make_9_subplot(ax, 'Image effect (cirrus plot)', xlabel_jd, 'mMag', '', False,
+                   x_data=df_this_plot['JD_fract'], y_data=1000.0 * df_this_plot['ImageEffect'],
+                   alpha=1.0, jd_locators=True)
+    ax.invert_yaxis()  # per custom of plotting magnitudes brighter=upward
+
+    # SkyADU plot (comps only, one point per obs: x=JD_fract, y=SkyADU):
+    ax = axes[1, 1]
+    make_9_subplot(ax, 'SkyADU vs time', xlabel_jd, 'ADU', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['SkyADU'],
+                   jd_locators=True)
+
+    # FWHM plot (comps only, one point per obs: x=JD_fract, y=FWHM):
+    ax = axes[1, 2]
+    make_9_subplot(ax, 'FWHM vs time', xlabel_jd, 'FWHM (pixels)', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['FWHM'],
+                   jd_locators=True)
+
+    # InstMagSigma plot (comps only, one point per obs; x=JD_fract, y=InstMagSigma):
+    ax = axes[2, 0]
+    make_9_subplot(ax, 'Inst Mag Sigma vs time', xlabel_jd, 'mMag', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['InstMagSigma'],
+                   jd_locators=True)
+
+    # Obs.Airmass plot (comps only, one point per obs; x=JD_fract, y=ObsAirmass):
+    ax = axes[2, 1]
+    make_9_subplot(ax, 'Obs.Airmass vs time', xlabel_jd, 'Obs.Airmass', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['ObsAirmass'],
+                   jd_locators=True)
+
+    # Session Lightcurve plot (comps only, one point per obs; x=JD_fract, y=MP best magnitude):
+    ax = axes[2, 2]
+    make_9_subplot(ax, 'MP Lightcurve for this session', xlabel_jd, 'Mag (r)', '', False,
+                   x_data=model.df_mp_mags['JD_mid'] - jd_floor, y_data=model.df_mp_mags['MP_Mags'],
+                   alpha=1.0, jd_locators=True)
+    ax.errorbar(x=model.df_mp_mags['JD_mid'] - jd_floor, y=model.df_mp_mags['MP_Mags'],
+                yerr=model.df_mp_mags['InstMagSigma'], fmt='none', color='black',
+                linewidth=0.5, capsize=3, capthick=0.5, zorder=-100)
+    ax.invert_yaxis()  # per custom of plotting magnitudes brighter=upward
+
+    plt.show()
+    fig.savefig(SESSION_PLOT_FILE_PREFIX + '3_Catalog_and_Time.png')
+
+    # ################ SESSION FIGURE 4: Residual plots:
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15, 9
+    fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+    fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     residual plots',
+                 color='darkblue', fontsize=20)
+    fig.canvas.set_window_title('Residual Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+    subplot_text = str(len(df_plot_comp_obs)) + ' obs   ' + \
+                   str(n_comps) + ' comps    ' + \
+                   'sigma=' + '{0:.0f}'.format(1000.0 * sigma) + ' mMag' + \
+                   (12 * ' ') + ' rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+    fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+
+    # Comp residual plot (comps only, one point per obs: x=catalog r mag, y=model residual):
+    ax = axes[0, 0]
+    make_9_subplot(ax, 'Model residual vs r (catalog)', 'Catalog Mag (r)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['r'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=len(model.df_mp_mags) * [0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+    draw_x_line(ax, session_dict['min catalog r mag'])
+    draw_x_line(ax, session_dict['max catalog r mag'])
+
+    # Comp residual plot (comps only, one point per obs: x=raw Instrument Mag, y=model residual):
+    ax = axes[0, 1]
+    make_9_subplot(ax, 'Model residual vs raw Instrument Mag', 'Raw instrument mag', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['InstMag'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+    ax.scatter(x=model.df_mp_mags['InstMag'], y=len(model.df_mp_mags) * [0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Comp residual plot (comps only, one point per obs: x=catalog r-i color, y=model residual):
+    ax = axes[0, 2]
+    make_9_subplot(ax, 'Model residual vs Color Index (cat)', 'Catalog Color (r-i)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['r'] - df_plot_comp_obs['i'],
+                   y_data=1000.0 * df_plot_comp_obs['Residual'])
+    ax.scatter(x=[session_dict['mp ri color']], y=[0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Comp residual plot (comps only, one point per obs: x=Julian Date fraction, y=model residual):
+    ax = axes[1, 0]
+    make_9_subplot(ax, 'Model residual vs JD', xlabel_jd, 'mMag', '', True,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['Residual'],
+                   jd_locators=True)
+
+    # Comp residual plot (comps only, one point per obs: x=ObsAirmass, y=model residual):
+    ax = axes[1, 1]
+    make_9_subplot(ax, 'Model residual vs Obs.Airmass', 'ObsAirmass', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['ObsAirmass'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+
+    # Comp residual plot (comps only, one point per obs: x=Sky Flux (ADUs), y=model residual):
+    ax = axes[1, 2]
+    make_9_subplot(ax, 'Model residual vs Sky Flux', 'Sky Flux (ADU)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['SkyADU'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+
+    # Comp residual plot (comps only, one point per obs: x=X in images, y=model residual):
+    ax = axes[2, 0]
+    make_9_subplot(ax, 'Model residual vs X in image', 'X from center (pixels)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['X1024'] * 1024.0, y_data=1000.0 * df_plot_comp_obs['Residual'])
+    draw_x_line(ax, 0.0)
+
+    # Comp residual plot (comps only, one point per obs: x=Y in images, y=model residual):
+    ax = axes[2, 1]
+    make_9_subplot(ax, 'Model residual vs Y in image', 'Y from center (pixels)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['Y1024'] * 1024.0, y_data=1000.0 * df_plot_comp_obs['Residual'])
+    draw_x_line(ax, 0.0)
+
+    # Comp residual plot (comps only, one point per obs: x=vignette (dist from center), y=model residual):
+    ax = axes[2, 2]
+    make_9_subplot(ax, 'Model residual vs distance from center', 'dist from center (pixels)', 'mMag',
+                   '', True,
+                   x_data=1024*np.sqrt(df_plot_comp_obs['Vignette']),
+                   y_data=1000.0 * df_plot_comp_obs['Residual'])
+
+    plt.show()
+    fig.savefig(SESSION_PLOT_FILE_PREFIX + '4_Residuals.png')
+
+    # ################ FIGURE(S) 5: Variability plots:
+    # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
+    # Make df_offsets (one row per obs, at first with only raw offsets):
+    make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, transform, sigma,
+                                image_prefix=SESSION_PLOT_FILE_PREFIX)
+
+
+_____SUPPORT_for_PLOTTING___________________________________________________ = 0
+
+
+def make_qq_plot_fullpage(window_title, page_title, plot_annotation,
+                          y_data, y_labels, filename, figsize=(11, 8.5)):
+    """ Make full-page QQ plot from data passed in. Plot on console, and save plot file. """
+    fig, axes = plt.subplots(ncols=1, nrows=1, figsize=figsize)  # (width, height) in "inches"
+    ax = axes  # not subscripted if just one subplot in Figure
+    ax.set_title(page_title, color='darkblue', fontsize=20, pad=30)
+    ax.set_xlabel('t (sigma.residuals = ' + str(round(pd.Series(y_data).std(), 1)) + ' mMag)')
+    ax.set_ylabel('Residual (mMag)')
+    ax.grid(True, color='lightgray', zorder=-1000)
+    df_y = pd.DataFrame({'Y': y_data, 'Label': y_labels}).sort_values(by='Y')
+    n = len(df_y)
+    t_values = [norm.ppf((k - 0.5) / n) for k in range(1, n + 1)]
+    ax.scatter(x=t_values, y=df_y['Y'], alpha=0.6, color='dimgray', zorder=+1000)
+    # Label potential outliers:
+    z_score_y = (df_y['Y'] - df_y['Y'].mean()) / df_y['Y'].std()
+    is_outlier = (abs(z_score_y) >= 2.0)
+    for x, y, label, add_label in zip(t_values, df_y['Y'], df_y['Label'], is_outlier):
+        if add_label:
+            ax.annotate(label, xy=(x, y), xytext=(4, -4),
+                        textcoords='offset points', ha='left', va='top', rotation=-40)
+    # Add reference line:
+    x_low = 1.10 * min(t_values)
+    x_high = 1.10 * max(t_values)
+    y_low = x_low * df_y['Y'].std()
+    y_high = x_high * df_y['Y'].std()
+    ax.plot([x_low, x_high], [y_low, y_high], color='gray', zorder=-100, linewidth=1)
+    # Finish FIGURE 1:
+    fig.text(x=0.5, y=0.87, s=plot_annotation,
+             verticalalignment='top', horizontalalignment='center', fontsize=12)
+    fig.canvas.set_window_title(window_title)
+    plt.show()
+    fig.savefig(filename)
+
+
+def make_9_subplot(ax, title, x_label, y_label, text, zero_line, x_data, y_data,
+                   size=14, alpha=0.3, color='black', jd_locators=False):
+    """ Make a subplot sized to 3x3 subplots/page. Frame w/labels only if x_data is None or y_data is None.
+    :param ax: axis location of this subplot. [matplotlib Axes object]
+    :param title: text atop the plot. [string]
+    :param x_label: x-axis label. [string]
+    :param y_label: y_axis label. [string]
+    :param text: text inside top border (rarely used). [string]
+    :param zero_line: iff True, plot a light line along Y=0. [boolean]
+    :param x_data: vector of x-values to plot. [iterable of floats]
+    :param y_data: vector of y-values to plot, must equal x_data in length. [iterable of floats]
+    :param size: size of points to plot each x,y. [float, weird matplotlib scale]
+    :param alpha: opacity of each point. [float, 0 to 1]
+    :param color: name of color to plot each point. [string, matplotlib color]
+    :param jd_locators: iff True, make x-axis ticks convenient to plotting JDs of one night. [boolean]
+    :return: [no return value]
+    """
+    ax.set_title(title, loc='center', pad=-3)  # pad in points
+    ax.set_xlabel(x_label, labelpad=-29)  # labelpad in points
+    ax.set_ylabel(y_label, labelpad=-5)  # "
+    ax.text(x=0.5, y=0.95, s=text,
+            horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+    if zero_line is True:
+        ax.axhline(y=0, color='lightgray', linewidth=1, zorder=-100)
+    if x_data is not None and y_data is not None:
+        ax.scatter(x=x_data, y=y_data, s=size, alpha=alpha, color=color)
+    if jd_locators:
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+        ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+
+
+def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, transform, sigma,
+                                image_prefix):
+    """ Make pages of 9 subplots, 4 comps per subplot, showing jackknife comp residuals.
+    :param mp_string:
+    :param an_string:
+    :param df_plot_comp_obs: table of data from which to generate all subplots. [pandas Dataframe]
+    :param xlabel_jd: label to go under x-axis (JD axis) for each subplot. [string]
+    :param transform: Sloan r-i transform used for data. [float]
+    :param sigma: std deviation of comp responses from fit. [float]
+    :param image_prefix: prefix for output images' filenames. [string]
+    :return:
+    """
+    comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
+    n_comps = len(comp_ids)
+    dict_list = []
+    for comp_id in comp_ids:
+        is_comp_id = df_plot_comp_obs['SourceID'] == comp_id
+        serials = df_plot_comp_obs.loc[is_comp_id, 'Serial']
+        jd_fracts = df_plot_comp_obs.loc[is_comp_id, 'JD_fract']
+        inst_mags = df_plot_comp_obs.loc[is_comp_id, 'InstMag']
+        r_catmag = df_plot_comp_obs.loc[is_comp_id, 'r']
+        color_ri = r_catmag - df_plot_comp_obs.loc[is_comp_id, 'i']
+        raw_offsets = inst_mags - r_catmag - transform * color_ri  # pd Series
+        for i in range(len(serials)):
+            comp_dict = dict()
+            comp_dict['SourceID'] = comp_id
+            comp_dict['Serial'] = serials.iloc[i]
+            comp_dict['JD_fract'] = jd_fracts.iloc[i]
+            comp_dict['RawOffset'] = raw_offsets.iloc[i]
+            dict_list.append(comp_dict)
+    df_comp_offsets = pd.DataFrame(data=dict_list)
+    df_comp_offsets.index = df_comp_offsets['Serial']
+
+    # Normalize offsets by subtracting mean of *other* comps' offsets at each JD_fract:
+    all_jd_fracts = df_comp_offsets['JD_fract'].copy().drop_duplicates().sort_values()
+    df_comp_offsets['NormalizedOffset'] = None
+    df_comp_offsets['LatestNormalizedOffset'] = None
+    for comp_id in comp_ids:
+        is_comp_id = (df_comp_offsets['SourceID'] == comp_id)
+        valid_jd_fracts = []
+        for jd_fract in all_jd_fracts:
+            is_this_jd_fract = (df_comp_offsets['JD_fract'] == jd_fract)
+            mean_other_offsets = df_comp_offsets.loc[(~is_comp_id) & is_this_jd_fract, 'RawOffset'].mean()
+            is_this_obs = is_comp_id & is_this_jd_fract
+            this_raw_offset = df_comp_offsets.loc[is_this_obs, 'RawOffset'].mean()
+            normalized_offset = this_raw_offset - mean_other_offsets
+            df_comp_offsets.loc[is_this_obs, 'NormalizedOffset'] = normalized_offset
+            if not np.isnan(normalized_offset):
+                valid_jd_fracts.append(jd_fract)
+        is_latest_jd_fract = df_comp_offsets['JD_fract'] == valid_jd_fracts[-1]
+        latest_normalized_offset = df_comp_offsets.loc[is_comp_id & is_latest_jd_fract, 'NormalizedOffset']
+        df_comp_offsets.loc[is_comp_id, 'LatestNormalizedOffset'] = latest_normalized_offset.iloc[0]
+
+    df_comp_offsets = df_comp_offsets.sort_values(by=['LatestNormalizedOffset', 'SourceID', 'JD_fract'],
+                                                  ascending=[False, True, True])
+    df_plot_index = df_comp_offsets[['SourceID']].drop_duplicates()
+    df_plot_index['PlotIndex'] = range(len(df_plot_index))
+    df_comp_offsets = pd.merge(left=df_comp_offsets, right=df_plot_index,
+                               how='left', on='SourceID', sort=False)
+
+    # Plot the normalized offsets vs JD for each comp_id, 4 comp_ids to a subplot:
+    n_cols, n_rows = 3, 3
+    n_plots_per_figure = n_cols * n_rows
+    n_comps_per_plot = 4
+    n_plots = ceil(n_comps / n_comps_per_plot)
+    plot_colors = ['r', 'g', 'm', 'b']
+    n_figures = ceil(n_plots / n_plots_per_figure)
+    jd_range = max(all_jd_fracts) - min(all_jd_fracts)
+    jd_low_limit = min(all_jd_fracts) - 0.05 * jd_range
+    jd_high_limit = max(all_jd_fracts) + 0.40 * jd_range
+    normalized_offset_mmag = 1000.0 * df_comp_offsets['NormalizedOffset']
+    offset_range = max(normalized_offset_mmag) - min(normalized_offset_mmag)
+    offset_low_limit = min(normalized_offset_mmag) - 0.05 * offset_range
+    offset_high_limit = max(normalized_offset_mmag) + 0.05 * offset_range
+    plotted_comp_ids = []
+    for i_figure in range(n_figures):
+        n_plots_remaining = n_plots - (i_figure * n_plots_per_figure)
+        n_plots_this_figure = min(n_plots_remaining, n_plots_per_figure)
+        if n_plots_this_figure >= 1:
+            # Start new Figure:
+            fig, axes = plt.subplots(ncols=n_cols, nrows=n_rows, figsize=(11, 8.5))  # was 15, 9
+            fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+            fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+            fig.suptitle('MP ' + mp_string + '   AN ' + an_string + '     ::     Comp Variability Page ' +
+                         str(i_figure + 1) + ' of ' + str(n_figures),
+                         color='darkblue', fontsize=20)
+            fig.canvas.set_window_title(
+                'Comp Variability Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+            subplot_text = str(n_comps) + ' comps    ' + \
+                           'sigma=' + '{0:.0f}'.format(1000.0 * sigma) + ' mMag' + (12 * ' ') + \
+                           ' rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+            fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12,
+                     color='dimgray')
+            for i_plot in range(n_plots_this_figure):
+                first_index_in_plot = i_figure * n_plots_per_figure + i_plot
+                i_col = i_plot % n_cols
+                i_row = int(floor(i_plot / n_cols))
+                ax = axes[i_row, i_col]
+                # Make a frame and axes only (x and y vectors are None):
+                make_9_subplot(ax, 'Comp Variability plot', xlabel_jd, 'mMag', '', True, None, None)
+                # Make a scatter plot for each chosen comp:
+                scatterplots = []
+                legend_labels = []
+                for i_plot_comp in range(n_comps_per_plot):
+                    i_plot_index = first_index_in_plot + i_plot_comp * n_plots
+                    if i_plot_index <= n_comps - 1:
+                        is_this_plot = (df_comp_offsets['PlotIndex'] == i_plot_index)
+                        x = df_comp_offsets.loc[is_this_plot, 'JD_fract']
+                        y = 1000.0 * df_comp_offsets.loc[is_this_plot, 'NormalizedOffset']
+                        ax.plot(x, y, linewidth=2, alpha=0.8, color=plot_colors[i_plot_comp])
+                        sc = ax.scatter(x=x, y=y, s=24, alpha=0.8, color=plot_colors[i_plot_comp])
+                        scatterplots.append(sc)
+                        this_comp_id = (df_comp_offsets.loc[is_this_plot, 'SourceID']).iloc[0]
+                        # print('i_figure ' + str(i_figure) +\
+                        #       '  i_plot ' + str(i_plot) +\
+                        #       '  i_plot_comp ' + str(i_plot_comp) +\
+                        #       '  i_plot_index ' + str(i_plot_index) +\
+                        #       '  this_comp_id ' + this_comp_id)  # (debug)
+                        legend_labels.append(this_comp_id)
+                        plotted_comp_ids.append(this_comp_id)
+                ax.set_xlim(jd_low_limit, jd_high_limit)
+                ax.set_ylim(offset_low_limit, offset_high_limit)
+                ax.xaxis.set_major_locator(ticker.MaxNLocator(4))
+                ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
+                ax.legend(scatterplots, legend_labels, loc='upper right')
+            # Remove any empty subplots from this (last) Figure:
+            for i_plot in range(n_plots_this_figure, n_plots_per_figure):
+                i_col = i_plot % n_cols
+                i_row = int(floor(i_plot / n_cols))
+                ax = axes[i_row, i_col]
+                ax.remove()
+        plt.show()
+        plt.savefig(image_prefix + '5_Comp Variability_' + '{:02d}'.format(i_figure + 1) + '.png')
+
+    # Verify that all comps were plotted exactly once (debug):
+    all_comps_plotted_once = (sorted(comp_ids) == sorted(plotted_comp_ids))
+    # print('all comp ids were plotted exactly once = ', str(all_comps_plotted_once))
+    if not all_comps_plotted_once:
+        print('comp ids plotted more than once',
+              [item for item, count in Counter(plotted_comp_ids).items() if count > 1])
+
+
+def draw_x_line(ax, x_value, color='lightgray'):
+    """ Draw vertical line, typically to mark MP transit time. """
+    ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)
 
 
 
