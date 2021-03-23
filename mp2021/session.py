@@ -350,7 +350,7 @@ def make_dfs():
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
     _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
     _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
-    _add_ri_color_df_comp_obs(df_comp_obs)
+    _add_ri_color_df_comps(df_comps)
 
     # Write dataframes to CSV files:
     _write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
@@ -396,8 +396,8 @@ def do_session():
 
     _write_mpfile_line(mp_string, an_string, model)
     _write_canopus_file(mp_string, an_string, this_directory, model)
-    _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_directory, model)
-    _make_session_diagnostic_plots(model, df_model, session_dict)
+    _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model)
+    # _make_session_diagnostic_plots(model, df_model)
 
 
 _____SUPPORT_for_make_dfs_____________________________________________ = 0
@@ -623,8 +623,8 @@ def _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
     print('ObsAirmasses written to df_mp_obs:', str(len(df_mp_obs)))
 
 
-def _add_ri_color_df_comp_obs(df_comp_obs):
-    df_comp_obs['ri_color'] = df_comp_obs['r'] - df_comp_obs['i']
+def _add_ri_color_df_comps(df_comps):
+    df_comps['ri_color'] = df_comps['r'] - df_comps['i']
 
 
 
@@ -646,10 +646,13 @@ def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
     context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
     this_directory, mp_string, an_string, filter_string = context
 
-    df_images_all = _read_session_csv(this_directory, session_dict['df_images filename'])
-    df_comps_all = _read_session_csv(this_directory, session_dict['df_comps filename'])
-    df_comp_obs_all = _read_session_csv(this_directory, session_dict['df_comp_obs filename'])
-    df_mp_obs_all = _read_session_csv(this_directory, session_dict['df_mp_obs filename'])
+    df_images_all = _read_session_csv(this_directory, defaults_dict['df_images filename'])
+    df_comps_all = _read_session_csv(this_directory, defaults_dict['df_comps filename'],
+                                     dtype_dict={'CompID': str})
+    df_comp_obs_all = _read_session_csv(this_directory, defaults_dict['df_comp_obs filename'],
+                                        dtype_dict={'CompID': str, 'ObsID': str})
+    df_mp_obs_all = _read_session_csv(this_directory, defaults_dict['df_mp_obs filename'],
+                                      dtype_dict={'ObsID': str})
 
     # Keep only rows in specified filters:
     image_rows_to_keep = df_images_all['Filter'].isin(filters_to_include)
@@ -668,27 +671,29 @@ def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
     # Remove images and all obs from images having no MP obs, if requested:
     if require_mp_obs_each_image:
         images_with_mp_obs = df_mp_obs['FITSfile'].drop_duplicates()
-        image_rows_to_keep = df_images_all['FITSfile'].isin(images_with_mp_obs)
-        df_images = df_images_all.loc[image_rows_to_keep, :]
-        comp_obs_rows_to_keep = df_comp_obs_all['FITSfile'].isin(images_with_mp_obs)
-        df_comp_obs = df_comp_obs_all.loc[comp_obs_rows_to_keep, :]
-        mp_obs_rows_to_keep = df_mp_obs_all['FITSfile'].isin(images_with_mp_obs)
-        df_mp_obs = df_mp_obs_all.loc[mp_obs_rows_to_keep, :]
+        image_rows_to_keep = df_images['FITSfile'].isin(images_with_mp_obs)
+        df_images = df_images.loc[image_rows_to_keep, :]
+        comp_obs_rows_to_keep = df_comp_obs['FITSfile'].isin(images_with_mp_obs)
+        df_comp_obs = df_comp_obs.loc[comp_obs_rows_to_keep, :]
+        mp_obs_rows_to_keep = df_mp_obs['FITSfile'].isin(images_with_mp_obs)
+        df_mp_obs = df_mp_obs.loc[mp_obs_rows_to_keep, :]
 
-    # Perform merges to produce master dataframes:
+    # Perform merges to produce master comp dataframes:
     df_comp_obs = pd.merge(left=df_comp_obs, right=df_images, how='left', on='FITSfile')
-    df_comp_master = pd.merge(left=df_comp_obs, right=df_comps_all, how='left', on='CompID')
-    df_comp_master.index = df_comp_master['CompID'].values
+    df_comp_master = pd.merge(left=df_comp_obs, right=df_comps_all.drop(columns=['RA_deg', 'Dec_deg']),
+                              how='left', on='CompID')
+    df_comp_master.index = df_comp_master['ObsID'].values
     df_mp_master = pd.merge(left=df_mp_obs, right=df_images, how='left', on='FITSfile')
-    df_mp_master.index = df_mp_master['MP_ID'].values
-
+    df_mp_master.index = df_mp_master['ObsID'].values
     return df_comp_master, df_mp_master
 
 
-def _read_session_csv(this_directory, session_dict, filename):
+def _read_session_csv(this_directory, filename, dtype_dict=None):
     """ Simple utility to read specified CSV file into a pandas Dataframe. """
     fullpath = os.path.join(this_directory, filename)
-    return pd.read_csv(fullpath, sep=';', index_col=0)
+    df = pd.read_csv(fullpath, sep=';', index_col=0, header=0, dtype=dtype_dict)
+    df.index = df.index.astype(str)
+    return df
 
 
 def _make_df_model(df_comp_master):
@@ -703,9 +708,9 @@ def _make_df_model(df_comp_master):
     image_count = len(df_comp_master['FITSfile'].drop_duplicates())
     comp_obs_count_each_image = df_comp_master.groupby('CompID')[['FITSfile', 'CompID']].count()
     comp_ids_in_every_image = [id for id in comp_id_list
-                               if comp_obs_count_each_image[id, 'FITSfile'] == image_count]
+                               if comp_obs_count_each_image.loc[id, 'FITSfile'] == image_count]
     rows_with_qualified_comp_ids = df_comp_master['CompID'].isin(comp_ids_in_every_image)
-    df_model = df_comp_master[rows_with_qualified_comp_ids]
+    df_model = df_comp_master.loc[rows_with_qualified_comp_ids, :]
     return df_model
 
 
@@ -770,7 +775,7 @@ class SessionModel:
 
         # Handle transform (Color Index) option:
         # Options: ('fit', '1'), ('fit', '2'), ('use', [Tr1]), ('use', [Tr1], [Tr2]).
-        self.df_used_comps_obs['CI'] = self.df_used_comps_obs['ri']
+        self.df_used_comps_obs['CI'] = self.df_used_comps_obs['ri_color']
         self.df_used_comps_obs['CI2'] = [ci ** 2 for ci in self.df_used_comps_obs['CI']]
         transform_option = self.session_dict['fit transform']
         if transform_option == ('fit', '1'):
@@ -796,7 +801,7 @@ class SessionModel:
             fixed_effect_var_list.append('ObsAirmass')
         elif isinstance(extinction_option, tuple) and len(extinction_option) == 2 and \
             (extinction_option[0] == 'use'):
-            extinction_offset = float(extinction_option[1]) * self.df_used_comps_obs['ObsAIrmass']
+            extinction_offset = float(extinction_option[1]) * self.df_used_comps_obs['ObsAirmass']
             dep_var_offset += extinction_offset
         else:
             raise SessionSpecificationError('Invalid \'Fit Extinction\' option in session.ini')
@@ -851,19 +856,19 @@ class SessionModel:
             if len(transform_option) == 2:
                 transform_offset = float(transform_option[1]) * self.df_used_mp_obs['CI']
             else:  # len(transform_option) == 3 (as previously vetted).
-                transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI'] + \
-                                   float(transform_option[2]) * self.df_used_comps_obs['CI2']
+                transform_offset = float(transform_option[1]) * self.df_used_mp_obs['CI'] + \
+                                   float(transform_option[2]) * self.df_used_mp_obs['CI2']
             dep_var_offset += transform_offset
 
         # Handle extinction offsets for MPs:
         extinction_option = self.session_dict['fit extinction']
         if isinstance(extinction_option, tuple):  # will be ('use', [ext]), as previously vetted.
-            extinction_offset = float(extinction_option[1]) * self.df_used_comps_obs['ObsAIrmass']
+            extinction_offset = float(extinction_option[1]) * self.df_used_mp_obs['ObsAirmass']
             dep_var_offset += extinction_offset
 
         # Calculate best MP magnitudes, incl. effect of assumed bogus_cat_mag:
         mp_mags = self.df_used_mp_obs['InstMag'] - dep_var_offset - raw_predictions + bogus_cat_mag
-        df_mp_mags = pd.DataFrame(data={'MP Mags': mp_mags}, index=list(mp_mags.index))
+        df_mp_mags = pd.DataFrame(data={'MP_Mags': mp_mags}, index=list(mp_mags.index))
         df_mp_mags = pd.merge(left=df_mp_mags,
                               right=self.df_used_mp_obs.loc[:, ['JD_mid', 'FITSfile',
                                                                 'InstMag', 'InstMagSigma']],
@@ -890,9 +895,16 @@ def _write_canopus_file(mp_string, an_string, this_directory, model):
         f.write(fulltext)
 
 
-def _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_directory, model):
-    mpfile_names = util.get_mp_filenames(this_directory)
-    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string)]
+def all_mpfile_names(mpfile_directory):
+    """ Returns list of all MPfile names (from filenames in mpfile_directory). """
+    mpfile_names = [fname for fname in os.listdir(mpfile_directory)
+                    if (fname.endswith(".txt")) and (fname.startswith("MP_"))]
+    return mpfile_names
+
+
+def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model):
+    mpfile_names = all_mpfile_names(defaults_dict['mpfile directory'])
+    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string + '_')]
     if len(name_list) <= 0:
         print(' >>>>> WARNING: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')
         return
@@ -945,7 +957,7 @@ def _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_direc
     lines.append('COMMENT=These results from submitter\'s '
                  'ATLAS-refcat2 based workflow: see SAS Symposium 2020.')
     lines.append('COMMENT=This session used ' +
-                 str(len(model.df_used_mp_obs['SourceID'].drop_duplicates())) +
+                 str(len(model.df_used_mp_obs['MP_ID'].drop_duplicates())) +
                  ' comp stars. COMPNAME etc lines are omitted.')
     lines.append('CICORRECTION=TRUE')
     lines.append('CIBAND=SRI')
@@ -965,7 +977,7 @@ def _write_alcdef_file(mp_string, an_string, session_dict, site_dict, this_direc
         f.write(fulltext)
 
 
-def _make_session_diagnostic_plots(model, df_model, session_dict):
+def _make_session_diagnostic_plots(model, df_model):
     """  Display and write to file several diagnostic plots, to:
          * decide which obs, comps, images might need removal by editing session.ini, and
          * possibly adjust regression parameters, also by editing session.ini. """
@@ -986,7 +998,7 @@ def _make_session_diagnostic_plots(model, df_model, session_dict):
     df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
     sigma = model.mm_fit.sigma
     # (Skip value of transform for now.)
-    comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
+    comp_ids = df_plot_comp_obs['CompID'].drop_duplicates()
     n_comps = len(comp_ids)
     jd_floor = floor(min(df_model['JD_mid']))
     xlabel_jd = 'JD(mid)-' + str(jd_floor)
@@ -994,8 +1006,8 @@ def _make_session_diagnostic_plots(model, df_model, session_dict):
     # ################ SESSION FIGURE 1: Q-Q plot of mean comp effects (1 pt per comp star used in model).
     window_title = 'Q-Q Plot (by comp):  MP ' + mp_string + '   AN ' + an_string
     page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp (mean residual)'
-    plot_annotation = str(n_comps) + ' comps used in model.' + '\n(tags: comp SourceID)'
-    df_y = df_plot_comp_obs.loc[:, ['SourceID', 'Residual']].groupby(['SourceID']).mean()
+    plot_annotation = str(n_comps) + ' comps used in model.' + '\n(tags: comp CompID)'
+    df_y = df_plot_comp_obs.loc[:, ['CompID', 'Residual']].groupby(['CompID']).mean()
     df_y = df_y.sort_values(by='Residual')
     y_data = df_y['Residual'] * 1000.0  # for millimags
     y_labels = df_y.index.values

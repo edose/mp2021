@@ -128,3 +128,8 @@ dmypy.json
 .gitignore
 *.fts
 *.csv
+test/$sessions_for_test/MP_191/AN20200617/alcdef_MP_191_20200617.txt
+
+test/$sessions_for_test/MP_191/AN20200617/canopus_MP_191_20200617.txt
+
+test/$sessions_for_test/MP_191/AN20200617/fit_summary.txt
