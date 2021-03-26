@@ -400,7 +400,7 @@ def do_session():
     _write_mpfile_line(mp_string, an_string, model)
     _write_canopus_file(mp_string, an_string, this_directory, model)
     _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model)
-    # _make_session_diagnostic_plots(model, df_model)
+    _make_session_diagnostic_plots(model, df_model)
 
 
 _____SUPPORT_for_make_dfs_____________________________________________ = 0
@@ -844,7 +844,7 @@ class SessionModel:
         if self.session_dict['fit jd']:
             fixed_effect_var_list.append('JD_fract')
         if len(fixed_effect_var_list) == 0:
-            fixed_effect_var_list = ['JD_fract']  # as statsmodels requires >= 1 fixed-effect variable.
+            fixed_effect_var_list = ['Vignette']  # as statsmodels requires >= 1 fixed-effect variable.
 
         # Build 'random-effect' and dependent (y) variables:
         random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
@@ -860,7 +860,7 @@ class SessionModel:
                                     group_var=random_effect_var_name)
         n_comps_used = len(self.df_used_comps_obs['CompID'].drop_duplicates())
         print(self.mm_fit.statsmodels_object.summary())
-        print('comps =', str(n_comps_used), ' used.' )
+        print('comps =', str(n_comps_used), ' used.')
         print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
         if not self.mm_fit.converged:
             msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
@@ -1032,6 +1032,9 @@ def _make_session_diagnostic_plots(model, df_model):
     df_plot_comp_obs = pd.merge(left=df_model.loc[df_model['UseInModel'], :].copy(),
                                 right=model.mm_fit.df_observations,
                                 how='left', left_index=True, right_index=True, sort=False)
+    df_plot_comp_obs = pd.merge(left=df_plot_comp_obs,
+                                right=model.df_used_comps_obs['InstMag_with_offsets'],
+                                how='left', left_index=True, right_index=True, sort=False)
     df_image_effect = model.mm_fit.df_random_effects
     df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
     sigma = model.mm_fit.sigma
@@ -1044,7 +1047,7 @@ def _make_session_diagnostic_plots(model, df_model):
     # ################ SESSION FIGURE 1: Q-Q plot of mean comp effects (1 pt per comp star used in model).
     window_title = 'Q-Q Plot (by comp):  MP ' + mp_string + '   AN ' + an_string
     page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp (mean residual)'
-    plot_annotation = str(n_comps) + ' comps used in model.' + '\n(tags: comp CompID)'
+    plot_annotation = str(n_comps) + ' comps used in model.' + '\n(tags: comp star ID)'
     df_y = df_plot_comp_obs.loc[:, ['CompID', 'Residual']].groupby(['CompID']).mean()
     df_y = df_y.sort_values(by='Residual')
     y_data = df_y['Residual'] * 1000.0  # for millimags
@@ -1057,11 +1060,11 @@ def _make_session_diagnostic_plots(model, df_model):
     page_title = 'MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q plot by comp observation'
     plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' +\
                       str(n_comps) + ' comps used in model.' + \
-                      '\n (tags: observation Serial numbers)'
-    df_y = df_plot_comp_obs.loc[:, ['Serial', 'Residual']]
+                      '\n (tags: observation ID)'
+    df_y = df_plot_comp_obs.loc[:, ['ObsID', 'Residual']]
     df_y = df_y.sort_values(by='Residual')
     y_data = df_y['Residual'] * 1000.0  # for millimags
-    y_labels = df_y['Serial'].values
+    y_labels = df_y['ObsID'].values
     make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
                           SESSION_PLOT_FILE_PREFIX + '2_QQ_obs.png')
 
@@ -1218,8 +1221,8 @@ def _make_session_diagnostic_plots(model, df_model):
     # ################ FIGURE(S) 5: Variability plots:
     # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
     # Make df_offsets (one row per obs, at first with only raw offsets):
-    make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, transform, sigma,
-                                image_prefix=SESSION_PLOT_FILE_PREFIX)
+    make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, sigma,
+                                SESSION_PLOT_FILE_PREFIX)
 
 
 _____SUPPORT_for_PLOTTING___________________________________________________ = 0
@@ -1290,45 +1293,46 @@ def make_9_subplot(ax, title, x_label, y_label, text, zero_line, x_data, y_data,
         ax.xaxis.set_minor_locator(ticker.MaxNLocator(20))
 
 
-def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, transform, sigma,
-                                image_prefix):
+def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, sigma, image_prefix):
     """ Make pages of 9 subplots, 4 comps per subplot, showing jackknife comp residuals.
+    :param df_plot_comp_obs: table of data from which to generate all subplots. [pandas Dataframe]
     :param mp_string:
     :param an_string:
-    :param df_plot_comp_obs: table of data from which to generate all subplots. [pandas Dataframe]
     :param xlabel_jd: label to go under x-axis (JD axis) for each subplot. [string]
-    :param transform: Sloan r-i transform used for data. [float]
     :param sigma: std deviation of comp responses from fit. [float]
     :param image_prefix: prefix for output images' filenames. [string]
-    :return:
+    :return: [None]
     """
-    comp_ids = df_plot_comp_obs['SourceID'].drop_duplicates()
+    comp_ids = df_plot_comp_obs['CompID'].drop_duplicates()
     n_comps = len(comp_ids)
     dict_list = []
     for comp_id in comp_ids:
-        is_comp_id = df_plot_comp_obs['SourceID'] == comp_id
-        serials = df_plot_comp_obs.loc[is_comp_id, 'Serial']
+        is_comp_id = df_plot_comp_obs['CompID'] == comp_id
+        obs_ids = df_plot_comp_obs.loc[is_comp_id, 'ObsID']
         jd_fracts = df_plot_comp_obs.loc[is_comp_id, 'JD_fract']
         inst_mags = df_plot_comp_obs.loc[is_comp_id, 'InstMag']
         r_catmag = df_plot_comp_obs.loc[is_comp_id, 'r']
-        color_ri = r_catmag - df_plot_comp_obs.loc[is_comp_id, 'i']
-        raw_offsets = inst_mags - r_catmag - transform * color_ri  # pd Series
-        for i in range(len(serials)):
+        # color_ri = r_catmag - df_plot_comp_obs.loc[is_comp_id, 'i']
+        # transform_offset = 0.4 * color_ri - 0.6 * color_ri ** 2
+        # raw_offsets_per_mpc = inst_mags - r_catmag - transform_offset
+        raw_offsets = df_plot_comp_obs.loc[is_comp_id, 'InstMag_with_offsets']
+        # raw_offsets = inst_mags - r_catmag  # - transform_1 * color_ri  # pd Series
+        for i in range(len(obs_ids)):
             comp_dict = dict()
-            comp_dict['SourceID'] = comp_id
-            comp_dict['Serial'] = serials.iloc[i]
+            comp_dict['CompID'] = comp_id
+            comp_dict['ObsID'] = obs_ids.iloc[i]
             comp_dict['JD_fract'] = jd_fracts.iloc[i]
             comp_dict['RawOffset'] = raw_offsets.iloc[i]
             dict_list.append(comp_dict)
     df_comp_offsets = pd.DataFrame(data=dict_list)
-    df_comp_offsets.index = df_comp_offsets['Serial']
+    df_comp_offsets.index = df_comp_offsets['ObsID']
 
     # Normalize offsets by subtracting mean of *other* comps' offsets at each JD_fract:
     all_jd_fracts = df_comp_offsets['JD_fract'].copy().drop_duplicates().sort_values()
     df_comp_offsets['NormalizedOffset'] = None
     df_comp_offsets['LatestNormalizedOffset'] = None
     for comp_id in comp_ids:
-        is_comp_id = (df_comp_offsets['SourceID'] == comp_id)
+        is_comp_id = (df_comp_offsets['CompID'] == comp_id)
         valid_jd_fracts = []
         for jd_fract in all_jd_fracts:
             is_this_jd_fract = (df_comp_offsets['JD_fract'] == jd_fract)
@@ -1343,12 +1347,12 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
         latest_normalized_offset = df_comp_offsets.loc[is_comp_id & is_latest_jd_fract, 'NormalizedOffset']
         df_comp_offsets.loc[is_comp_id, 'LatestNormalizedOffset'] = latest_normalized_offset.iloc[0]
 
-    df_comp_offsets = df_comp_offsets.sort_values(by=['LatestNormalizedOffset', 'SourceID', 'JD_fract'],
+    df_comp_offsets = df_comp_offsets.sort_values(by=['LatestNormalizedOffset', 'CompID', 'JD_fract'],
                                                   ascending=[False, True, True])
-    df_plot_index = df_comp_offsets[['SourceID']].drop_duplicates()
+    df_plot_index = df_comp_offsets[['CompID']].drop_duplicates()
     df_plot_index['PlotIndex'] = range(len(df_plot_index))
     df_comp_offsets = pd.merge(left=df_comp_offsets, right=df_plot_index,
-                               how='left', on='SourceID', sort=False)
+                               how='left', on='CompID', sort=False)
 
     # Plot the normalized offsets vs JD for each comp_id, 4 comp_ids to a subplot:
     n_cols, n_rows = 3, 3
@@ -1402,7 +1406,7 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
                         ax.plot(x, y, linewidth=2, alpha=0.8, color=plot_colors[i_plot_comp])
                         sc = ax.scatter(x=x, y=y, s=24, alpha=0.8, color=plot_colors[i_plot_comp])
                         scatterplots.append(sc)
-                        this_comp_id = (df_comp_offsets.loc[is_this_plot, 'SourceID']).iloc[0]
+                        this_comp_id = (df_comp_offsets.loc[is_this_plot, 'CompID']).iloc[0]
                         # print('i_figure ' + str(i_figure) +\
                         #       '  i_plot ' + str(i_plot) +\
                         #       '  i_plot_comp ' + str(i_plot_comp) +\
@@ -1426,7 +1430,6 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
 
     # Verify that all comps were plotted exactly once (debug):
     all_comps_plotted_once = (sorted(comp_ids) == sorted(plotted_comp_ids))
-    # print('all comp ids were plotted exactly once = ', str(all_comps_plotted_once))
     if not all_comps_plotted_once:
         print('comp ids plotted more than once',
               [item for item, count in Counter(plotted_comp_ids).items() if count > 1])
