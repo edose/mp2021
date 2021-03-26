@@ -537,8 +537,16 @@ def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
         raw_ap = MovingSourceAp(fo.image_fits, xy_start, xy_end, disc_radius, gap, background_width,
                                 source_id=mp_string, obs_id=str(obs_id))
         if raw_ap.is_valid and raw_ap.all_inside_image:  # severest screen available from PointSourceAp.
-            ap = raw_ap.recenter(max_iterations=5)
+            ap = raw_ap.recenter(max_iterations=3)
             if ap.is_valid and ap.all_inside_image:
+                # *************** START temporary TEST CODE:
+                # # xy_mid = (xy_start[0] + xy_end[0]) / 2, (xy_start[1] + xy_end[1]) / 2
+                # round_ap = PointSourceAp(fo.image_fits, ap.xy_center, disc_radius, gap,
+                #                          background_width, source_id=mp_string, obs_id=str(obs_id))
+                # print(filename, '{:.0f}'.format(ap.net_flux), '{:.0f}'.format(round_ap.net_flux),
+                #       '{:.4f}'.format(ap.net_flux / round_ap.net_flux), '(using PointSourceAp)')
+                # ap.net_flux = round_ap.net_flux
+                # *************** END temporary TEST CODE
                 mp_apertures_dict[fo.filename] = ap
                 ra_mid = (ra_start + ra_end) / 2
                 dec_mid = (dec_start + dec_end) / 2
@@ -749,7 +757,7 @@ def _mark_user_selections(df_model, session_dict):
                                 | deselect_for_low_r_mag | deselect_for_high_r_mag
                                 | deselect_for_high_dr_mmag | deselect_for_high_di_mmag
                                 | deselect_for_low_ri_color | deselect_for_high_ri_color)
-    df_model['UseInModel'] = ~ obs_to_deselect
+    df_model.loc[:, 'UseInModel'] = ~ obs_to_deselect
     return df_model
 
 
@@ -795,8 +803,10 @@ class SessionModel:
         transform_option = self.session_dict['fit transform']
         if transform_option == ('fit', '1'):
             fixed_effect_var_list.append('CI')
+            msg = ' Transform first-order fit to Color Index.'
         elif transform_option == ('fit', '2'):
             fixed_effect_var_list.extend(['CI', 'CI2'])
+            msg = ' Transform second-order fit to Color Index.'
         elif transform_option[0] == 'use':
             if len(transform_option) == 2:
                 transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI']
@@ -806,6 +816,8 @@ class SessionModel:
             else:
                 raise SessionSpecificationError('Invalid \'Fit Transform\' option in session.ini')
             dep_var_offset += transform_offset
+            msg = ' Transform (Color Index) not fit: 1st, 2nd order values fixed at' + \
+                  transform_option[1] + transform_option[2]
         else:
             raise SessionSpecificationError('Invalid \'Fit Transform\' option in session.ini')
 
@@ -814,10 +826,13 @@ class SessionModel:
         extinction_option = self.session_dict['fit extinction']
         if extinction_option == 'yes':
             fixed_effect_var_list.append('ObsAirmass')
+            msg = ' Extinction fit on ObsAirmass data.'
         elif isinstance(extinction_option, tuple) and len(extinction_option) == 2 and \
             (extinction_option[0] == 'use'):
             extinction_offset = float(extinction_option[1]) * self.df_used_comps_obs['ObsAirmass']
             dep_var_offset += extinction_offset
+            msg = ' Extinction (ObsAirmass) not fit: value fixed at default of' + \
+                  ' {0:.3f}'.format(float(extinction_option[1]))
         else:
             raise SessionSpecificationError('Invalid \'Fit Extinction\' option in session.ini')
 
@@ -854,7 +869,7 @@ class SessionModel:
 
         write_text_file(self.this_directory, 'fit_summary.txt',
                         'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
-                        '\n'.join(fit_summary_lines) +
+                        '\n'.join(fit_summary_lines) + '\n\n' +
                         self.mm_fit.statsmodels_object.summary().as_text() +
                         '\ncomps = ' + str(n_comps_used) + ' used' +
                         '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
@@ -935,7 +950,7 @@ def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_d
 
     # Build data that will go into file:
     lines = list()
-    lines.append('# ALCDEF file for MP ' + mp_string + '  AN ' + an_string)
+    lines.append('# ALCDEF file for MP ' + mp_string + '  AN ' + an_string + ' (mp2021 workflow)')
     lines.append('STARTMETADATA')
     lines.append('REVISEDDATA=FALSE')
     lines.append('OBJECTNUMBER=' + mp_string)
@@ -945,7 +960,11 @@ def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_d
     lines.append('CONTACTNAME=' + ALCDEF_BASE_DATA['contactname'])
     lines.append('CONTACTINFO=' + ALCDEF_BASE_DATA['contactinfo'])
     lines.append('OBSERVERS=' + ALCDEF_BASE_DATA['observers'])
-    lines.append('OBSLONGITUDE=' + '{0:.4f}'.format(site_dict['longitude']))
+    if site_dict['longitude'] <= 180:
+        alcdef_longitude = site_dict['longitude']
+    else:
+        alcdef_longitude = site_dict['longitude'] - 360.0
+    lines.append('OBSLONGITUDE=' + '{0:.4f}'.format(alcdef_longitude))
     lines.append('OBSLATITUDE=' + '{0:.4f}'.format(site_dict['latitude']))
     lines.append('FACILITY=' + site_dict['name'])
     lines.append('MPCCODE=' + site_dict['mpc code'])
@@ -973,10 +992,10 @@ def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_d
     lines.append('PHASE=+' + '{0:.1f}'.format(abs(session_eph_dict['Phase'])))
     lines.append('PABL=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_longitude'])))
     lines.append('PABB=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_latitude'])))
-    lines.append('COMMENT=These results from submitter\'s '
-                 'ATLAS-refcat2 based workflow: see SAS Symposium 2020.')
+    lines.append('COMMENT=These results from submitter\'s ATLAS-refcat2 based workflow')
+    lines.append('COMMENT=as described in SAS Symposium 2020, using code at github.com/edose/mp2021.')
     lines.append('COMMENT=This session used ' +
-                 str(len(model.df_used_mp_obs['MP_ID'].drop_duplicates())) +
+                 str(len(model.df_used_comps_obs['CompID'].drop_duplicates())) +
                  ' comp stars. COMPNAME etc lines are omitted.')
     lines.append('CICORRECTION=TRUE')
     lines.append('CIBAND=SRI')
