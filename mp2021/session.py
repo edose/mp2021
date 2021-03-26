@@ -42,11 +42,13 @@ INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 
 FOCAL_LENGTH_MAX_PCT_DEVIATION = 1.0
 MINIMUM_COMP_OBS_COUNT = 5
+
+# The following apply only to initial screening of comps from catalog to dataframe(s):
 INITIAL_MIN_R_MAG = 10
 INITIAL_MAX_R_MAG = 16
 INITIAL_MAX_DR_MMAG = 20
 INITIAL_MAX_DI_MMAG = 20
-INITIAL_MIN_RI_COLOR = 0.0
+INITIAL_MIN_RI_COLOR = 0.00
 INITIAL_MAX_RI_COLOR = 0.44
 
 ALCDEF_BASE_DATA = {'contactname': 'Eric V. Dose',
@@ -292,7 +294,7 @@ def assess(return_results=False):
         if return_dict['warning count'] == 0:
             print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
             print('Next: (1) enter MP pixel positions in', session_ini_filename,
-                  'AND SAVE it,\n      (2) measure_mp()')
+                  'AND SAVE it,\n      (2) make_dfs()')
             log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
         else:
             print('\n >>>>> ' + str(return_dict['warning count']) + ' warnings (see listing above).')
@@ -310,7 +312,7 @@ def make_dfs():
     """ Perform aperture photometry for one session of lightcurve photometry only.
         For color index determination, see .make_color_dfs().
         """
-    context, defaults_dict, session_dict, log_file = _session_setup('make_dfs()')
+    context, defaults_dict, session_dict, log_file = _session_setup('make_dfs')
     this_directory, mp_string, an_string, filter_string = context
     instrument_dict = ini.make_instrument_dict(defaults_dict)
     instrument = Instrument(instrument_dict)
@@ -338,13 +340,14 @@ def make_dfs():
     # Make comp-star apertures, comps dataframe, and comp obs dataframe:
     df_comps = _make_df_comps(refcat2)
     comp_apertures_dict = _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
-    df_comp_obs = _make_df_comp_obs(comp_apertures_dict, df_comps, instrument)
+    df_comp_obs = _make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
 
     # Make MP apertures and MP obs dataframe:
+    starting_mp_obs_id = max(df_comp_obs['ObsID'].astype(int)) + 1
     mp_apertures_dict, mp_mid_radec_dict = _make_mp_apertures(fits_object_dict, mp_string, session_dict,
                                                               disc_radius, gap, background_width, log_file,
-                                                              starting_obs_id=len(df_comp_obs) + 2)
-    df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument)
+                                                              starting_obs_id=starting_mp_obs_id)
+    df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
 
     # Post-process dataframes:
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
@@ -361,7 +364,7 @@ def make_dfs():
     log_file.close()
     print('\nNext: (1) enter comp selection limits and model options in ' +
           defaults_dict['session control filename'],
-          '\n      (2) run do_mp_phot()\n')
+          '\n      (2) run do_session()\n')
 
 
 def do_session():
@@ -376,17 +379,17 @@ def do_session():
         * output lightcurve passband is fixed as Sloan 'r', and
         * color index is fixed as Sloan (r-i).
     :returns None. Writes all info to files.
-    USAGE: do_mp_phot()   [no return value]
+    USAGE: do_session()   [no return value]
     """
-    context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
+    context, defaults_dict, session_dict, log_file = _session_setup('do_session')
     this_directory, mp_string, an_string, filter_string = context
     log_filename = defaults_dict['session log filename']
     log_file = open(log_filename, mode='a')
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
     site_dict = ini.make_site_dict(defaults_dict)
-    log_file.write('\n===== do_session(' + filter_string + ')  ' +
-                   '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
+    # log_file.write('\n===== do_session(' + filter_string + ')  ' +
+    #                '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     df_comp_master, df_mp_master = _make_df_masters(filters_to_include=filter_string,
                                                     require_mp_obs_each_image=True)
@@ -449,18 +452,24 @@ def _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_wi
             raw_ap = PointSourceAp(fo.image_fits, xy, disc_radius, gap, background_width,
                                    str(comp_id), str(obs_id))
             if raw_ap.is_valid and raw_ap.all_inside_image:  # severest screen available from PointSourceAp.
-                ap = raw_ap.recenter(max_iterations=5)
+                ap = raw_ap.recenter(max_iterations=3)
                 if ap.is_valid and ap.all_inside_image:
                     ap_list.append(ap)
                     obs_id += 1
+                    if obs_id % 10 == 0:
+                        print('.', end='', flush=True)
+                    if obs_id % 1000 == 0:
+                        print('{:6d} raw apertures done'.format(obs_id), flush=True)
         comp_apertures_dict[fo.filename] = ap_list
+    print()
     return comp_apertures_dict
 
 
-def _make_df_comp_obs(comp_apertures, df_comps, instrument):
+def _make_df_comp_obs(comp_apertures, df_comps, instrument, df_images):
     gain = instrument.gain
     comp_obs_dict_list = []
     for filename in comp_apertures.keys():
+        exposure = df_images.loc[filename, 'Exposure']
         for ap in comp_apertures[filename]:
             if ap.is_valid and ap.net_flux > 0:
                 x1024 = instrument.x1024(ap.xy_center.x)
@@ -474,7 +483,7 @@ def _make_df_comp_obs(comp_apertures, df_comps, instrument):
                         'CompID': ap.source_id,
                         'ObsID': ap.obs_id,
                         'Type': 'Comp',
-                        'InstMag': -2.5 * log10(ap.net_flux),
+                        'InstMag': -2.5 * log10(ap.net_flux / exposure),
                         'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
                         'DiscRadius': ap.foreground_radius,
                         'SkyRadiusInner': ap.foreground_radius + ap.gap,
@@ -538,10 +547,11 @@ def _make_mp_apertures(fits_object_dict, mp_string, session_dict,
     return mp_apertures_dict, mp_mid_radec_dict
 
 
-def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
+def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument, df_images):
     gain = instrument.gain
     mp_obs_dict_list = []
     for filename, ap in mp_apertures.items():
+        exposure = df_images.loc[filename, 'Exposure']
         if ap.is_valid and ap.net_flux > 0:
             x1024 = instrument.x1024(ap.xy_center.x)
             y1024 = instrument.y1024(ap.xy_center.y)
@@ -554,7 +564,7 @@ def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument):
                     'MP_ID': 'MP_' + ap.source_id,
                     'ObsID': ap.obs_id,
                     'Type': 'MP',
-                    'InstMag': -2.5 * log10(ap.net_flux),
+                    'InstMag': -2.5 * log10(ap.net_flux / exposure),
                     'InstMagSigma': (2.5 / log(10)) * (ap.flux_stddev(gain) / ap.net_flux),
                     'SkyADU': ap.background_level,
                     'SkySigma': ap.background_std,
@@ -600,10 +610,15 @@ def _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images):
                      in zip(df_comps.index, df_comps['RA_deg'], df_comps['Dec_deg'])}
     altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
                         for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
+    print('ObsAirmasses: ', end='', flush=True)
+    done_count = 0
     for obs, filename, comp_id in zip(df_comp_obs.index, df_comp_obs['FITSfile'], df_comp_obs['CompID']):
         alt = skycoord_dict[comp_id].transform_to(altaz_frame_dict[filename]).alt.value
         df_comp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
-    print('ObsAirmasses written to df_comp_obs:', str(len(df_comp_obs)))
+        done_count += 1
+        if done_count % 100 == 0:
+            print('.', end='', flush=True)
+    print('\nObsAirmasses written to df_comp_obs:', str(len(df_comp_obs)))
 
 
 def _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
@@ -828,17 +843,21 @@ class SessionModel:
                                     dep_var=self.dep_var_name,
                                     fixed_vars=fixed_effect_var_list,
                                     group_var=random_effect_var_name)
+        n_comps_used = len(self.df_used_comps_obs['CompID'].drop_duplicates())
         print(self.mm_fit.statsmodels_object.summary())
+        print('comps =', str(n_comps_used), ' used.' )
         print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
         if not self.mm_fit.converged:
             msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
             print(msg)
             fit_summary_lines.append(msg)
+
         write_text_file(self.this_directory, 'fit_summary.txt',
-                        'Regression for directory ' + self.this_directory + '\n\n' +
+                        'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
                         '\n'.join(fit_summary_lines) +
                         self.mm_fit.statsmodels_object.summary().as_text() +
-                        '\n\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
+                        '\ncomps = ' + str(n_comps_used) + ' used' +
+                        '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
 
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
@@ -1488,6 +1507,7 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'Filename = session.template',
         '']
     mp_location_lines = [
+        '[MP Location]',
         '# Exactly 2 MP XY, one per line (typically earliest and latest FITS):',
         'MP XY = ' + filename_earliest + ' 000.0  000.0',
         '        ' + filename_latest + ' 000.0  000.0',
@@ -1505,30 +1525,30 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'Omit Obs =',
         '# One image only per line, with or without .fts:',
         'Omit Images =',
-        'Min Catalog r mag = 10.0',
-        'Max Catalog r mag = 16.0',
-        'Max Catalog dr mmag = 16.0',
-        'Max Catalog di mmag = 16.0',
-        'Min Catalog ri color = 0.00',
-        'Max Catalog ri color = 0.44',
+        'Min Catalog r mag = 12',
+        'Max Catalog r mag = 16',
+        'Max Catalog dr mmag = 16',
+        'Max Catalog di mmag = 16',
+        'Min Catalog ri color = 0.10',
+        'Max Catalog ri color = 0.34',
         '']
     regression_lines = [
         '[Regression]',
         'MP ri color = +0.220',
-        'MP ri color origin = Default MP color'
+        'MP ri color origin = Default MP color',
         '# Fit Transform, one of: Fit=1, Fit=2, Use [val1], Use [val1] [val2]:',
         'Fit Transform = Use +0.4 -0.6',
         '# Fit Extinction, one of: Yes, Use [val]:',
         'Fit Extinction = Use +0.16',
         'Fit Vignette = Yes',
         'Fit XY = No',
-        'Fit JD = Yes']
+        'Fit JD = No']
     raw_lines = header_lines + ini_lines + mp_location_lines + selection_criteria_lines + regression_lines
     ready_lines = [line + '\n' for line in raw_lines]
     if not os.path.exists(fullpath):
         with open(fullpath, 'w') as f:
             f.writelines(ready_lines)
-    print('New ' + session_ini_filename + ' file written.\n')
+    # print('New ' + session_ini_filename + ' file written.\n')
 
 
 def _session_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
@@ -1556,6 +1576,7 @@ def initial_screen_comps(refcat2):
     :return info: text documenting actions taken. [list of strings]
     """
     info = []
+    info.append('Begin with ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_min_r_mag(INITIAL_MIN_R_MAG)
     info.append('Refcat2: min(r) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_r_mag(INITIAL_MAX_R_MAG)
