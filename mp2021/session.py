@@ -157,6 +157,7 @@ def assess(return_results=False):
     """
     # Setup, including initializing return_dict:
     # (Can't use orient_this_function(), because session.ini may not exist yet.)
+    # TODO: add check for coherent RA,Dec positions; a jackknife test? (or at least a listing of RADecs).
     try:
         context = _get_session_context()
     except SessionLogFileError as e:
@@ -402,7 +403,6 @@ def do_session():
     _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model)
     _make_session_diagnostic_plots(model, df_model)
 
-
 _____SUPPORT_for_make_dfs_____________________________________________ = 0
 
 
@@ -445,6 +445,7 @@ def _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_wi
     comp_apertures_dict = OrderedDict()
     obs_id = 1
     for fo in fits_objects:
+        print('\n' + fo.filename + ': ', end='', flush=True)
         ap_list = []
         for comp_id in df_comps.index:
             xy = fo.xy_from_radec(comp_radec_dict[comp_id])
@@ -458,8 +459,8 @@ def _make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_wi
                     obs_id += 1
                     if obs_id % 10 == 0:
                         print('.', end='', flush=True)
-                    if obs_id % 1000 == 0:
-                        print('{:6d} raw apertures done'.format(obs_id), flush=True)
+                    # if obs_id % 1000 == 0:
+                    #     print('{:6d} raw apertures done'.format(obs_id), flush=True)
         comp_apertures_dict[fo.filename] = ap_list
     print()
     return comp_apertures_dict
@@ -757,6 +758,7 @@ def _mark_user_selections(df_model, session_dict):
                                 | deselect_for_low_r_mag | deselect_for_high_r_mag
                                 | deselect_for_high_dr_mmag | deselect_for_high_di_mmag
                                 | deselect_for_low_ri_color | deselect_for_high_ri_color)
+    df_model = df_model.copy(deep=True)  # to shut up pandas and its fake warnings.
     df_model.loc[:, 'UseInModel'] = ~ obs_to_deselect
     return df_model
 
@@ -877,6 +879,7 @@ class SessionModel:
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
         bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
+        self.df_used_mp_obs = self.df_used_mp_obs.copy(deep=True)  # to shut up pandas & its fake warnings.
         self.df_used_mp_obs['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
         best_mp_ri_color = self.session_dict['mp ri color']
         self.df_used_mp_obs['CI'] = best_mp_ri_color
@@ -1303,54 +1306,37 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
     :param image_prefix: prefix for output images' filenames. [string]
     :return: [None]
     """
-    comp_ids = df_plot_comp_obs['CompID'].drop_duplicates()
-    n_comps = len(comp_ids)
-    dict_list = []
-    for comp_id in comp_ids:
-        is_comp_id = df_plot_comp_obs['CompID'] == comp_id
-        obs_ids = df_plot_comp_obs.loc[is_comp_id, 'ObsID']
-        jd_fracts = df_plot_comp_obs.loc[is_comp_id, 'JD_fract']
-        inst_mags = df_plot_comp_obs.loc[is_comp_id, 'InstMag']
-        r_catmag = df_plot_comp_obs.loc[is_comp_id, 'r']
-        # color_ri = r_catmag - df_plot_comp_obs.loc[is_comp_id, 'i']
-        # transform_offset = 0.4 * color_ri - 0.6 * color_ri ** 2
-        # raw_offsets_per_mpc = inst_mags - r_catmag - transform_offset
-        raw_offsets = df_plot_comp_obs.loc[is_comp_id, 'InstMag_with_offsets']
-        # raw_offsets = inst_mags - r_catmag  # - transform_1 * color_ri  # pd Series
-        for i in range(len(obs_ids)):
-            comp_dict = dict()
-            comp_dict['CompID'] = comp_id
-            comp_dict['ObsID'] = obs_ids.iloc[i]
-            comp_dict['JD_fract'] = jd_fracts.iloc[i]
-            comp_dict['RawOffset'] = raw_offsets.iloc[i]
-            dict_list.append(comp_dict)
-    df_comp_offsets = pd.DataFrame(data=dict_list)
-    df_comp_offsets.index = df_comp_offsets['ObsID']
+    df_comp_offsets = df_plot_comp_obs.loc[:, ['CompID', 'ObsID', 'JD_fract', 'InstMag_with_offsets']]
 
-    # Normalize offsets by subtracting mean of *other* comps' offsets at each JD_fract:
+    # Get normalized offsets (jackknife differences) (code simplified vs. mpc):
     all_jd_fracts = df_comp_offsets['JD_fract'].copy().drop_duplicates().sort_values()
     df_comp_offsets['NormalizedOffset'] = None
     df_comp_offsets['LatestNormalizedOffset'] = None
-    for comp_id in comp_ids:
+    for jd_fract in all_jd_fracts:
+        is_jd_fract = (df_comp_offsets['JD_fract'] == jd_fract)
+        obs_ids = df_comp_offsets.loc[is_jd_fract, 'ObsID']
+        inst_mag_count = sum(is_jd_fract == True)
+        inst_mag_sum = sum(df_comp_offsets.loc[is_jd_fract, 'InstMag_with_offsets'])
+        for obs_id in obs_ids:
+            this_inst_mag = df_comp_offsets.loc[obs_id, 'InstMag_with_offsets']
+            mean_other_inst_mags = (inst_mag_sum - this_inst_mag) / (inst_mag_count - 1)
+            df_comp_offsets.loc[obs_id, 'NormalizedOffset'] = this_inst_mag - mean_other_inst_mags
+
+    # Get latest normalized offset for each comp (plotting aid):
+    all_comp_ids = df_comp_offsets['CompID'].copy().drop_duplicates()
+    for comp_id in all_comp_ids:
         is_comp_id = (df_comp_offsets['CompID'] == comp_id)
-        valid_jd_fracts = []
-        for jd_fract in all_jd_fracts:
-            is_this_jd_fract = (df_comp_offsets['JD_fract'] == jd_fract)
-            mean_other_offsets = df_comp_offsets.loc[(~is_comp_id) & is_this_jd_fract, 'RawOffset'].mean()
-            is_this_obs = is_comp_id & is_this_jd_fract
-            this_raw_offset = df_comp_offsets.loc[is_this_obs, 'RawOffset'].mean()
-            normalized_offset = this_raw_offset - mean_other_offsets
-            df_comp_offsets.loc[is_this_obs, 'NormalizedOffset'] = normalized_offset
-            if not np.isnan(normalized_offset):
-                valid_jd_fracts.append(jd_fract)
-        is_latest_jd_fract = df_comp_offsets['JD_fract'] == valid_jd_fracts[-1]
+        latest_jd_fract = max(df_comp_offsets.loc[is_comp_id, 'JD_fract'])
+        is_latest_jd_fract = (df_comp_offsets['JD_fract'] == latest_jd_fract)
         latest_normalized_offset = df_comp_offsets.loc[is_comp_id & is_latest_jd_fract, 'NormalizedOffset']
         df_comp_offsets.loc[is_comp_id, 'LatestNormalizedOffset'] = latest_normalized_offset.iloc[0]
 
+    # Add plot_index, so that comps are plotted in decreasing order of offsets:
     df_comp_offsets = df_comp_offsets.sort_values(by=['LatestNormalizedOffset', 'CompID', 'JD_fract'],
                                                   ascending=[False, True, True])
     df_plot_index = df_comp_offsets[['CompID']].drop_duplicates()
     df_plot_index['PlotIndex'] = range(len(df_plot_index))
+    df_plot_index.index = list(df_plot_index['PlotIndex'])
     df_comp_offsets = pd.merge(left=df_comp_offsets, right=df_plot_index,
                                how='left', on='CompID', sort=False)
 
@@ -1358,6 +1344,7 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
     n_cols, n_rows = 3, 3
     n_plots_per_figure = n_cols * n_rows
     n_comps_per_plot = 4
+    n_comps = len(df_plot_index)
     n_plots = ceil(n_comps / n_comps_per_plot)
     plot_colors = ['r', 'g', 'm', 'b']
     n_figures = ceil(n_plots / n_plots_per_figure)
@@ -1406,7 +1393,7 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
                         ax.plot(x, y, linewidth=2, alpha=0.8, color=plot_colors[i_plot_comp])
                         sc = ax.scatter(x=x, y=y, s=24, alpha=0.8, color=plot_colors[i_plot_comp])
                         scatterplots.append(sc)
-                        this_comp_id = (df_comp_offsets.loc[is_this_plot, 'CompID']).iloc[0]
+                        this_comp_id = df_plot_index.loc[i_plot_index, 'CompID']
                         # print('i_figure ' + str(i_figure) +\
                         #       '  i_plot ' + str(i_plot) +\
                         #       '  i_plot_comp ' + str(i_plot_comp) +\
@@ -1429,7 +1416,8 @@ def make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_j
         plt.savefig(image_prefix + '5_Comp Variability_' + '{:02d}'.format(i_figure + 1) + '.png')
 
     # Verify that all comps were plotted exactly once (debug):
-    all_comps_plotted_once = (sorted(comp_ids) == sorted(plotted_comp_ids))
+    all_comp_ids = df_plot_index['CompID']
+    all_comps_plotted_once = (sorted(plotted_comp_ids) == sorted(all_comp_ids))
     if not all_comps_plotted_once:
         print('comp ids plotted more than once',
               [item for item, count in Counter(plotted_comp_ids).items() if count > 1])
@@ -1543,10 +1531,10 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
     #     '']
     selection_criteria_lines = [
         '[Selection Criteria]',
-        'Omit Comps =',
-        'Omit Obs =',
+        'Omit Comps = ',
+        'Omit Obs = ',
         '# One image only per line, with or without .fts:',
-        'Omit Images =',
+        'Omit Images = ',
         'Min Catalog r mag = 12',
         'Max Catalog r mag = 16',
         'Max Catalog dr mmag = 16',
@@ -1632,6 +1620,9 @@ def calc_mp_motion(session_dict, fits_object_dict, log_file):
     mp_location_filenames = [item[0] for item in session_dict['mp xy']][:2]
     mp_location_fits_objects = [fits_object_dict[fn] for fn in mp_location_filenames]
     mp_location_xy = [(item[1], item[2]) for item in session_dict['mp xy']][:2]
+    flatten_mp_location_xy = [y for x in mp_location_xy for y in x]
+    if any([x <= 0.0 for x in flatten_mp_location_xy]):
+        raise SessionIniFileError('MP XY invalid -- did you enter values and save session.ini?')
     mp_datetime, mp_ra_deg, mp_dec_deg = [], [], []
     for i in range(2):
         fo = mp_location_fits_objects[i]
@@ -1644,8 +1635,8 @@ def calc_mp_motion(session_dict, fits_object_dict, log_file):
     # Calculate MP reference location and motion:
     utc0, ra0, dec0 = mp_datetime[0], mp_ra_deg[0], mp_dec_deg[0]
     span_seconds = (mp_datetime[1] - utc0).total_seconds()
-    ra_per_second = (mp_ra_deg[1] - ra0) / span_seconds
-    dec_per_second = (mp_dec_deg[1] - dec0) / span_seconds
+    ra_per_second = (mp_ra_deg[1] - ra0) / span_seconds  # deg RA per second
+    dec_per_second = (mp_dec_deg[1] - dec0) / span_seconds  # deg Dec per second
     if log_file is not None:
         log_file.write('MP at JD ' + '{0:.5f}'.format(jd_from_datetime_utc(utc0)) + ':  RA,Dec='
                        + '{0:.5f}'.format(ra0) + u'\N{DEGREE SIGN}' + ', '
