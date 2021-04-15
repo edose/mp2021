@@ -172,39 +172,11 @@ def make_session_dict(defaults_dict, session_directory):
     # control_dict['ref star xy'] = ref_star_xy_list
 
     # Parse and overwrite 'mp xy':
-    mp_xy_list = []
-    mp_xy_lines = [line.strip() for line in session_dict['mp xy']]
-    for line in mp_xy_lines:
-        items = line.replace(',', ' ').rsplit(maxsplit=2)  # for each line, items are: filename x y
-        if len(items) != 3:
-            raise IniParseError('Session ini: MP x,y line: ' + line)
-        filename = items[0]
-        try:
-            x, y = float(items[1]), float(items[2])
-        except ValueError:
-            raise ValueError('Session ini: MP x or y is not a float.')
-        mp_xy_list.append((filename, x, y))
-    if len(mp_xy_list) != 2:
-        raise IniParseError('Session ini: MP x,y lines must number exactly 2.')
+    mp_xy_list = _extract_mp_xy_positions(session_dict, 'Session')
     session_dict['mp xy'] = mp_xy_list
 
     # Selection Criteria section, Omit elements:
-    session_dict['omit comps'] = _multiline_ini_value_to_items(' '.join(session_dict['omit comps']))
-    session_dict['omit obs'] = _multiline_ini_value_to_items(' '.join(session_dict['omit obs']))
-    session_dict['omit images'] = [s.strip() for s in session_dict['omit images']]
-    try:
-        omit_comps_as_ints = [int(comp) for comp in session_dict['omit comps']]
-    except ValueError:
-        raise ValueError('Session ini: at least one Omit Comps entry is not an integer.') from None
-    if any([(i < 1) for i in omit_comps_as_ints]):
-        raise IniParseError('Session ini: at least one Omit Comps entry is not a positive integer.') \
-            from None
-    try:
-        omit_obs_as_ints = [int(obs) for obs in session_dict['omit obs']]
-    except ValueError:
-        raise ValueError('Session ini: at least one Omit Obs entry is not an integer.') from None
-    if any([(i < 1) for i in omit_obs_as_ints]):
-        raise IniParseError('Session ini: at least one Omit Obs entry is not a positive integer.') from None
+    session_dict = _extract_omit_comps_obs_images(session_dict, 'Session')
 
     # Standardize remaining elements:
     try:
@@ -221,7 +193,97 @@ def make_session_dict(defaults_dict, session_directory):
     return session_dict
 
 
+def make_color_dict(defaults_dict, color_directory):
+    """ Read the color control file for this color subdirectory, return color dict.
+    :param defaults_dict:
+    :param color_directory:
+    :return: color_dict [py dict].
+    Structure of color_dict:
+      { 'mp xy': [(filename1, x1, y1), (filename2, x2, y2)],
+        'omit comps': ['22', '44', '4221'],
+        'omit obs': ['4223', '429']
+        'omit images': ['MP_1443_0001-Clear.fts'],
+        'min catalog r mag': 12.5,
+        'max catalog r mag': 16,
+        'max catalog dr mmag': 15,
+        'min catalog ri color': 0.10,
+        'max catalog ri color': 0.34,
+        'mp ri color': +0.22,
+        'fit vignette': True }
+    """
+    color_ini_filename = defaults_dict['color control filename']
+    fullpath = os.path.join(color_directory, color_ini_filename)
+    color_ini = astropak.ini.IniFile(fullpath, template_directory_path=INI_DIRECTORY)
+    color_dict = color_ini.value_dict  # raw values, a few to be reparsed just below:
+
+    # Parse and overwrite 'mp xy':
+    mp_xy_list = _extract_mp_xy_positions(color_dict, 'Color')
+    color_dict['mp xy'] = mp_xy_list
+
+    # Selection Criteria section, Omit elements:
+    color_dict = _extract_omit_comps_obs_images(color_dict, 'Color')
+
+    return color_dict
+
+
+
+
+
 _____INI_UTILITIES______________________________________ = 0
+
+
+def _extract_mp_xy_positions(control_dict, control_type):
+    """ From session or color control dict, extract and return MP x,y positions given for 2 FITS files.
+    :param control_dict: session or color control dict. [py dict]
+    :param control_type: 'Session' or 'Color', as appropriate. [string]
+    :return:
+    """
+    control_string = control_type.strip().title()
+    mp_xy_list = []
+    mp_xy_lines = [line.strip() for line in control_dict['mp xy']]
+    for line in mp_xy_lines:
+        items = line.replace(',', ' ').rsplit(maxsplit=2)  # for each line, items are: filename x y
+        if len(items) != 3:
+            raise IniParseError(control_string + ' ini: MP x,y line: ' + line)
+        filename = items[0]
+        try:
+            x, y = float(items[1]), float(items[2])
+        except ValueError:
+            raise ValueError(control_string + ' ini: MP x or y is not a float.')
+        mp_xy_list.append((filename, x, y))
+    if len(mp_xy_list) != 2:
+        raise IniParseError(control_string + ' ini: MP x,y lines must number exactly 2.')
+    return mp_xy_list
+
+
+def _extract_omit_comps_obs_images(control_dict, control_type):
+    """ From session or color control dict, extract identifiers for comp stars, observations, and
+        images to omit from regression, return an updated copy of the control_dict.
+    :param control_dict: session or color control dict. [py dict]
+    :param control_type: 'Session' or 'Color', as appropriate. [string]
+    :return:
+    """
+    control_string = control_type.strip().title()
+    control_dict['omit comps'] = _multiline_ini_value_to_items(' '.join(control_dict['omit comps']))
+    control_dict['omit obs'] = _multiline_ini_value_to_items(' '.join(control_dict['omit obs']))
+    control_dict['omit images'] = [s.strip() for s in control_dict['omit images']]
+    try:
+        omit_comps_as_ints = [int(comp) for comp in control_dict['omit comps']]
+    except ValueError:
+        error_string = control_string + ' ini: at least one Omit Comps entry is not an integer.'
+        raise ValueError(error_string) from None
+    if any([(i < 1) for i in omit_comps_as_ints]):
+        error_string = control_string + ' ini: at least one Omit Comps entry is not a positive integer.'
+        raise IniParseError(error_string) from None
+    try:
+        omit_obs_as_ints = [int(obs) for obs in control_dict['omit obs']]
+    except ValueError:
+        error_string = control_string + ' ini: at least one Omit Obs entry is not an integer.'
+        raise ValueError(error_string) from None
+    if any([(i < 1) for i in omit_obs_as_ints]):
+        error_string = control_string + ' ini: at least one Omit Obs entry is not a positive integer.'
+        raise IniParseError(error_string) from None
+    return control_dict
 
 
 def _multiline_ini_value_to_lines(value):

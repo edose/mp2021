@@ -1,0 +1,17 @@
+[MP Location]
+MP XY          = string list -> mp xy
+
+[Selection Criteria]
+Omit Comps   = string list -> omit comps
+Omit Obs     = string list -> omit obs
+# Omit Images: one filename per line only.
+Omit Images  = string list -> omit images
+Min Catalog r mag    = float -> min catalog r mag
+Max Catalog r mag    = float -> max catalog r mag
+Max Catalog dr mmag  = float -> max catalog dr mmag
+Max Catalog di mmag  = float -> max catalog di mmag
+Min Catalog ri color = float -> min catalog ri color
+Max Catalog ri color = float -> max catalog ri color
+
+[Regression]
+Fit Vignette   = boolean -> fit vignette
