@@ -1,6 +1,11 @@
 __author__ = "Eric Dose, Albuquerque"
 
-from mp2021.session import SessionIniFileError
+from astroplan import Observer
+from astropy import units as u
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
+
+from astropak.reference import DEGREES_PER_RADIAN
 
 """ This module: 
       
@@ -9,7 +14,7 @@ from mp2021.session import SessionIniFileError
 # Python core:
 import os
 from collections import Counter, OrderedDict
-from math import floor, log10, log
+from math import floor, log10, log, sin
 
 # External packages:
 import numpy as np
@@ -158,6 +163,20 @@ def do_fits_assessments(defaults_dict, this_directory):
 
 
 _____SUPPORT_for_make_dfs_____________________________________________ = 0
+
+
+def validate_mp_xy(fits_filenames, control_dict):
+    """ Quick check for frequently made errors in MP XY entries in control dict.
+    :param fits_filenames:
+    :param control_dict:
+    :return: 2-tuple, (mp_xy_files_found, mp_xy_values_ok). [2-tuple of booleans, both True if OK]
+    """
+    mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in control_dict['mp xy']]
+    mp_xy_files_found = all([fn in fits_filenames for fn in mp_location_filenames])
+    mp_location_xy = [(item[1], item[2]) for item in control_dict['mp xy']][:2]
+    flatten_mp_location_xy = [y for x in mp_location_xy for y in x]
+    mp_xy_values_ok = all([x > 0.0 for x in flatten_mp_location_xy])
+    return mp_xy_files_found, mp_xy_values_ok
 
 
 def make_df_images(fits_objects):
@@ -325,7 +344,7 @@ def make_mp_apertures(fits_object_dict, mp_string, control_dict,
     return mp_apertures_dict, mp_mid_radec_dict
 
 
-def _make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument, df_images):
+def make_df_mp_obs(mp_apertures, mp_mid_radec_dict, instrument, df_images):
     gain = instrument.gain
     mp_obs_dict_list = []
     for filename, ap in mp_apertures.items():
@@ -380,9 +399,10 @@ def calc_mp_motion(session_dict, fits_object_dict, log_file):
     mp_location_filenames = [item[0] for item in session_dict['mp xy']][:2]
     mp_location_fits_objects = [fits_object_dict[fn] for fn in mp_location_filenames]
     mp_location_xy = [(item[1], item[2]) for item in session_dict['mp xy']][:2]
-    flatten_mp_location_xy = [y for x in mp_location_xy for y in x]
-    if any([x <= 0.0 for x in flatten_mp_location_xy]):
-        raise SessionIniFileError('MP XY invalid -- did you enter values and save session.ini?')
+    # ***** We have moved the following test higher in function heirarchy (to avoid passing in exception).
+    # flatten_mp_location_xy = [y for x in mp_location_xy for y in x]
+    # if any([x <= 0.0 for x in flatten_mp_location_xy]):
+    #     raise SessionIniFileError('MP XY invalid -- did you enter values and save session.ini?')
     mp_datetime, mp_ra_deg, mp_dec_deg = [], [], []
     for i in range(2):
         fo = mp_location_fits_objects[i]
@@ -404,6 +424,52 @@ def calc_mp_motion(session_dict, fits_object_dict, log_file):
                        + '{0:.6f}'.format(ra_per_second * 3600.0) + ', '
                        + '{0:.6f}'.format(dec_per_second * 3600.0) + '\n')
     return utc0, ra0, dec0, ra_per_second, dec_per_second
+
+
+def add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images):
+    observer = Observer(longitude=site_dict['longitude'] * u.deg,
+                        latitude=site_dict['latitude'] * u.deg,
+                        elevation=site_dict['elevation'] * u.m)
+    df_comp_obs['ObsAirmass'] = None
+    skycoord_dict = {comp_id: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                     for (comp_id, ra_deg, dec_deg)
+                     in zip(df_comps.index, df_comps['RA_deg'], df_comps['Dec_deg'])}
+    altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
+                        for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
+    print('ObsAirmasses: ', end='', flush=True)
+    done_count = 0
+    for obs, filename, comp_id in zip(df_comp_obs.index, df_comp_obs['FITSfile'], df_comp_obs['CompID']):
+        alt = skycoord_dict[comp_id].transform_to(altaz_frame_dict[filename]).alt.value
+        df_comp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+        done_count += 1
+        if done_count % 100 == 0:
+            print('.', end='', flush=True)
+    print('\nObsAirmasses written to df_comp_obs:', str(len(df_comp_obs)))
+
+
+def add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
+    observer = Observer(longitude=site_dict['longitude'] * u.deg,
+                        latitude=site_dict['latitude'] * u.deg,
+                        elevation=site_dict['elevation'] * u.m)
+    df_mp_obs['ObsAirmass'] = None
+    skycoord_dict = {filename: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                     for (filename, ra_deg, dec_deg) in zip(df_mp_obs['FITSfile'],
+                                                            df_mp_obs['RA_deg_mid'],
+                                                            df_mp_obs['Dec_deg_mid'])}
+    altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
+                        for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
+    for obs, filename in zip(df_mp_obs.index, df_mp_obs['FITSfile']):
+        alt = skycoord_dict[filename].transform_to(altaz_frame_dict[filename]).alt.value
+        df_mp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
+    print('ObsAirmasses written to df_mp_obs:', str(len(df_mp_obs)))
+
+
+def add_gr_color_df_comps(df_comps):
+    df_comps['gr_color'] = df_comps['g'] - df_comps['r']
+
+
+def add_ri_color_df_comps(df_comps):
+    df_comps['ri_color'] = df_comps['r'] - df_comps['i']
 
 
 _____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
@@ -469,7 +535,7 @@ def saturation_sat_at_xy1024(x1024, y1024, vignette_at_1024, adu_saturation):
     return adu_saturation * (1.0 - fraction_decreased)
 
 
-def _write_df_images_csv(df_images, this_directory, defaults_dict, log_file):
+def write_df_images_csv(df_images, this_directory, defaults_dict, log_file):
     filename_df_images = defaults_dict['df_images filename']
     fullpath_df_images = os.path.join(this_directory, filename_df_images)
     df_images.to_csv(fullpath_df_images, sep=';', quotechar='"',
@@ -478,7 +544,7 @@ def _write_df_images_csv(df_images, this_directory, defaults_dict, log_file):
     log_file.write(filename_df_images + ' written: ' + str(len(df_images)) + ' images.\n')
 
 
-def _write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file):
+def write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file):
     filename_df_comps = defaults_dict['df_comps filename']
     fullpath_df_comps = os.path.join(this_directory, filename_df_comps)
     df_comps.to_csv(fullpath_df_comps, sep=';', quotechar='"',
@@ -487,7 +553,7 @@ def _write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file):
     log_file.write(filename_df_comps + ' written: ' + str(len(df_comps)) + ' comp stars.\n')
 
 
-def _write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file):
+def write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file):
     filename_df_comp_obs = defaults_dict['df_comp_obs filename']
     fullpath_df_comp_obs = os.path.join(this_directory, filename_df_comp_obs)
     df_comp_obs.to_csv(fullpath_df_comp_obs, sep=';', quotechar='"',
@@ -497,7 +563,7 @@ def _write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
                    + str(len(df_comp_obs)) + ' comp star observations.\n')
 
 
-def _write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file):
+def write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file):
     filename_df_mp_obs = defaults_dict['df_mp_obs filename']
     fullpath_df_mp_obs = os.path.join(this_directory, filename_df_mp_obs)
     df_mp_obs.to_csv(fullpath_df_mp_obs, sep=';', quotechar='"',
@@ -510,3 +576,12 @@ def write_text_file(this_directory, filename, lines):
     fullpath = os.path.join(this_directory, filename)
     with open(fullpath, 'w') as f:
         f.write(lines)
+
+
+def read_mp2021_csv(this_directory, filename, dtype_dict=None):
+    """ Simple utility to read specified CSV file into a pandas Dataframe. """
+    fullpath = os.path.join(this_directory, filename)
+    df = pd.read_csv(fullpath, sep=';', index_col=0, header=0, dtype=dtype_dict)
+    df.index = df.index.astype(str)
+    return df
+

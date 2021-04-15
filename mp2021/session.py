@@ -11,13 +11,9 @@ __author__ = "Eric Dose, Albuquerque"
 import os
 from datetime import datetime, timezone
 from collections import Counter
-from math import floor, sin, ceil
+from math import floor, ceil
 
 # External packages:
-from astropy.coordinates import SkyCoord
-from astropy.time import Time
-import astropy.units as u
-from astroplan import Observer
 import numpy as np
 import pandas as pd
 # import statsmodels.formula.api as smf
@@ -29,14 +25,14 @@ from scipy.stats import norm
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
-from mp2021.util import Instrument
+from mp2021.util import Instrument, all_mpfile_names
 from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, initial_screen_comps, \
-    _make_df_mp_obs, _write_df_images_csv, _write_df_comps_csv, _write_df_comp_obs_csv, \
-    _write_df_mp_obs_csv, write_text_file
+    make_df_mp_obs, write_df_images_csv, write_df_comps_csv, write_df_comp_obs_csv, \
+    write_df_mp_obs_csv, write_text_file, read_mp2021_csv, validate_mp_xy, add_obsairmass_df_comp_obs, \
+    add_obsairmass_df_mp_obs, add_ri_color_df_comps
 
 from astropak.util import datetime_utc_from_jd, ra_as_hours, dec_as_hex
-from astropak.reference import DEGREES_PER_RADIAN
 from astropak.stats import MixedModelFit
 
 
@@ -198,10 +194,12 @@ def make_dfs(print_ap_details=False):
     if not fits_filenames:
         raise SessionDataError('No FITS files found in session directory ' + this_directory)
 
-    # Validate MP XY filenames:
-    mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in session_dict['mp xy']]
-    if any([fn not in fits_filenames for fn in mp_location_filenames]):
+    # Quick validation of MP XY filenames & values:
+    mp_xy_files_found, mp_xy_values_ok = validate_mp_xy(fits_filenames, session_dict)
+    if not mp_xy_files_found:
         raise SessionIniFileError('At least 1 MP XY file not found in session directory ' + this_directory)
+    if not mp_xy_values_ok:
+        raise SessionIniFileError('MP XY invalid -- did you enter values and save session.ini?')
 
     fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
     df_images = make_df_images(fits_objects)
@@ -223,19 +221,19 @@ def make_dfs(print_ap_details=False):
                                                              disc_radius, gap, background_width, log_file,
                                                              starting_obs_id=starting_mp_obs_id,
                                                              print_ap_details=print_ap_details)
-    df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
+    df_mp_obs = make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
 
     # Post-process dataframes:
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
-    _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
-    _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
-    _add_ri_color_df_comps(df_comps)
+    add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
+    add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
+    add_ri_color_df_comps(df_comps)
 
     # Write dataframes to CSV files:
-    _write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
-    _write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
-    _write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
-    _write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
+    write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
+    write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
+    write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
+    write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
 
     log_file.close()
     print('\nNext: (1) enter comp selection limits and model options in ' +
@@ -264,8 +262,6 @@ def do_session():
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
     site_dict = ini.make_site_dict(defaults_dict)
-    # log_file.write('\n===== do_session(' + filter_string + ')  ' +
-    #                '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
 
     df_comp_master, df_mp_master = _make_df_masters(filters_to_include=filter_string,
                                                     require_mp_obs_each_image=True)
@@ -291,55 +287,13 @@ def _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_m
             df_mp_obs = df_mp_obs.loc[df_mp_obs['FITSfile'] != filename, :]
 
 
-def _add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images):
-    observer = Observer(longitude=site_dict['longitude'] * u.deg,
-                        latitude=site_dict['latitude'] * u.deg,
-                        elevation=site_dict['elevation'] * u.m)
-    df_comp_obs['ObsAirmass'] = None
-    skycoord_dict = {comp_id: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
-                     for (comp_id, ra_deg, dec_deg)
-                     in zip(df_comps.index, df_comps['RA_deg'], df_comps['Dec_deg'])}
-    altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
-                        for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
-    print('ObsAirmasses: ', end='', flush=True)
-    done_count = 0
-    for obs, filename, comp_id in zip(df_comp_obs.index, df_comp_obs['FITSfile'], df_comp_obs['CompID']):
-        alt = skycoord_dict[comp_id].transform_to(altaz_frame_dict[filename]).alt.value
-        df_comp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
-        done_count += 1
-        if done_count % 100 == 0:
-            print('.', end='', flush=True)
-    print('\nObsAirmasses written to df_comp_obs:', str(len(df_comp_obs)))
-
-
-def _add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
-    observer = Observer(longitude=site_dict['longitude'] * u.deg,
-                        latitude=site_dict['latitude'] * u.deg,
-                        elevation=site_dict['elevation'] * u.m)
-    df_mp_obs['ObsAirmass'] = None
-    skycoord_dict = {filename: SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
-                     for (filename, ra_deg, dec_deg) in zip(df_mp_obs['FITSfile'],
-                                                            df_mp_obs['RA_deg_mid'],
-                                                            df_mp_obs['Dec_deg_mid'])}
-    altaz_frame_dict = {filename: observer.altaz(Time(jd_mid, format='jd'))
-                        for (filename, jd_mid) in zip(df_images['FITSfile'], df_images['JD_mid'])}
-    for obs, filename in zip(df_mp_obs.index, df_mp_obs['FITSfile']):
-        alt = skycoord_dict[filename].transform_to(altaz_frame_dict[filename]).alt.value
-        df_mp_obs.loc[obs, 'ObsAirmass'] = 1.0 / sin(alt / DEGREES_PER_RADIAN)
-    print('ObsAirmasses written to df_mp_obs:', str(len(df_mp_obs)))
-
-
-def _add_ri_color_df_comps(df_comps):
-    df_comps['ri_color'] = df_comps['r'] - df_comps['i']
-
-
-
 _____SUPPORT_for_do_session______________________________________________ = 0
 
 
 def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
     """ Get, screen and merge dataframes df_images_all, df_comps_all, df_comp_obs_all, and df_mp_obs_all
         into two master dataframes dataframe df_comp_master and df_mp_master.
+        USAGE (typical):
     :param filters_to_include: either one filter name, or a list of filters.
                Only observations in that filter or filters will be retained.
                None includes ALL filters given in input dataframes [None, or string, or list of strings]
@@ -352,13 +306,13 @@ def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
     context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
     this_directory, mp_string, an_string, filter_string = context
 
-    df_images_all = _read_session_csv(this_directory, defaults_dict['df_images filename'])
-    df_comps_all = _read_session_csv(this_directory, defaults_dict['df_comps filename'],
-                                     dtype_dict={'CompID': str})
-    df_comp_obs_all = _read_session_csv(this_directory, defaults_dict['df_comp_obs filename'],
-                                        dtype_dict={'CompID': str, 'ObsID': str})
-    df_mp_obs_all = _read_session_csv(this_directory, defaults_dict['df_mp_obs filename'],
-                                      dtype_dict={'ObsID': str})
+    df_images_all = read_mp2021_csv(this_directory, defaults_dict['df_images filename'])
+    df_comps_all = read_mp2021_csv(this_directory, defaults_dict['df_comps filename'],
+                                   dtype_dict={'CompID': str})
+    df_comp_obs_all = read_mp2021_csv(this_directory, defaults_dict['df_comp_obs filename'],
+                                      dtype_dict={'CompID': str, 'ObsID': str})
+    df_mp_obs_all = read_mp2021_csv(this_directory, defaults_dict['df_mp_obs filename'],
+                                    dtype_dict={'ObsID': str})
 
     # Keep only rows in specified filters:
     image_rows_to_keep = df_images_all['Filter'].isin(filters_to_include)
@@ -392,14 +346,6 @@ def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
     df_mp_master = pd.merge(left=df_mp_obs, right=df_images, how='left', on='FITSfile')
     df_mp_master.index = df_mp_master['ObsID'].values
     return df_comp_master, df_mp_master
-
-
-def _read_session_csv(this_directory, filename, dtype_dict=None):
-    """ Simple utility to read specified CSV file into a pandas Dataframe. """
-    fullpath = os.path.join(this_directory, filename)
-    df = pd.read_csv(fullpath, sep=';', index_col=0, header=0, dtype=dtype_dict)
-    df.index = df.index.astype(str)
-    return df
 
 
 def _make_df_model(df_comp_master):
@@ -612,13 +558,6 @@ def _write_canopus_file(mp_string, an_string, this_directory, model):
     fullpath = os.path.join(this_directory, 'canopus_MP_' + mp_string + '_' + an_string + '.txt')
     with open(fullpath, 'w') as f:
         f.write(fulltext)
-
-
-def all_mpfile_names(mpfile_directory):
-    """ Returns list of all MPfile names (from filenames in mpfile_directory). """
-    mpfile_names = [fname for fname in os.listdir(mpfile_directory)
-                    if (fname.endswith(".txt")) and (fname.startswith("MP_"))]
-    return mpfile_names
 
 
 def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model):

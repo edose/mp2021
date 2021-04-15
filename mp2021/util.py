@@ -411,3 +411,10 @@ class MPfile:
             if isinstance(value_before, datetime) or isinstance(value_before, float):
                 return_dict[k] = value_before + i_fract * (value_after - value_before)  # interpolated val.
         return return_dict
+
+
+def all_mpfile_names(mpfile_directory):
+    """ Returns list of all MPfile names (from filenames in mpfile_directory). """
+    mpfile_names = [fname for fname in os.listdir(mpfile_directory)
+                    if (fname.endswith(".txt")) and (fname.startswith("MP_"))]
+    return mpfile_names

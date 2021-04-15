@@ -9,10 +9,13 @@ from datetime import datetime, timezone
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
+from mp2021.session import _remove_images_without_mp_obs
 from mp2021.util import Instrument
 from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, \
-    initial_screen_comps, _make_df_mp_obs
+    initial_screen_comps, make_df_mp_obs, validate_mp_xy, add_obsairmass_df_comp_obs, \
+    add_obsairmass_df_mp_obs, add_gr_color_df_comps, add_ri_color_df_comps, write_df_images_csv, \
+    write_df_comps_csv, write_df_comp_obs_csv, write_df_mp_obs_csv
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
@@ -159,10 +162,12 @@ def make_dfs(print_ap_details=False):
     if not fits_filenames:
         raise ColorDataError('No FITS files found in color directory ' + this_directory)
 
-    # Validate MP XY filenames:
-    mp_location_filenames = [mp_xy_entry[0] for mp_xy_entry in color_dict['mp xy']]
-    if any([fn not in fits_filenames for fn in mp_location_filenames]):
+    # Quick validation of MP XY filenames & values:
+    mp_xy_files_found, mp_xy_values_ok = validate_mp_xy(fits_filenames, color_dict)
+    if not mp_xy_files_found:
         raise ColorIniFileError('At least 1 MP XY file not found in color directory ' + this_directory)
+    if not mp_xy_values_ok:
+        raise ColorIniFileError('MP XY invalid -- did you enter values and save color.ini?')
 
     fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
     df_images = make_df_images(fits_objects)
@@ -184,15 +189,27 @@ def make_dfs(print_ap_details=False):
                                                              disc_radius, gap, background_width, log_file,
                                                              starting_obs_id=starting_mp_obs_id,
                                                              print_ap_details=print_ap_details)
-    df_mp_obs = _make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
+    df_mp_obs = make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
 
+    # WANTED??: _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
+    add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
+    add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
+    add_gr_color_df_comps(df_comps)
+    add_ri_color_df_comps(df_comps)
 
+    # Write dataframes to CSV files:
+    write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
+    write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
+    write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
+    write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
 
-
+    log_file.close()
+    print('\nNext: (1) enter comp selection limits and regression model options in ' +
+          defaults_dict['color control filename'],
+          '\n      (2) run do_color()\n')
 
 
 __________SUPPORT_for_do_color____________________________________________ = 0
-
 
 
 __________SUPPORT_FUNCTIONS_and_CLASSES = 0
