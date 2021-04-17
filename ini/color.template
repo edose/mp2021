@@ -1,3 +1,6 @@
+[Color Definition]
+Color Definition Filename = string -> color definition filename
+
 [MP Location]
 MP XY          = string list -> mp xy
 

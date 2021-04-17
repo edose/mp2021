@@ -6,6 +6,7 @@ from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
 from astropak.reference import DEGREES_PER_RADIAN
+from mp2021.session import _session_setup
 
 """ This module: 
       
@@ -465,10 +466,12 @@ def add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images):
 
 
 def add_gr_color_df_comps(df_comps):
+    """ Simply add one color column to df_comps. """
     df_comps['gr_color'] = df_comps['g'] - df_comps['r']
 
 
 def add_ri_color_df_comps(df_comps):
+    """ Simply add one color column to df_comps. """
     df_comps['ri_color'] = df_comps['r'] - df_comps['i']
 
 
@@ -585,3 +588,108 @@ def read_mp2021_csv(this_directory, filename, dtype_dict=None):
     df.index = df.index.astype(str)
     return df
 
+
+def make_df_masters(this_directory, defaults_dict, filters_to_include=None, require_mp_obs_each_image=True,
+                    data_error_exception_type=ValueError):
+    """ Get, screen and merge dataframes df_images_all, df_comps_all, df_comp_obs_all, and df_mp_obs_all
+        into two master dataframes dataframe df_comp_master and df_mp_master.
+        USAGE (typical):
+    :param this_directory:
+    :param defaults_dict:
+    :param filters_to_include: either one filter name, or a list of filters.
+               Only observations in that filter or filters will be retained.
+               None includes ALL filters given in input dataframes [None, or string, or list of strings]
+    :param require_mp_obs_each_image: True to remove all obs from images without MP observation. [boolean]
+    :param data_error_exception_type: Exception type to raise if there is any problem with data read in.
+    :return: df_comp_master, df_mp_master, the two master tables of data, one row per retained observation.
+                 [2-tuple of pandas DataFrames]
+"""
+    if isinstance(filters_to_include, str):
+        filters_to_include = [filters_to_include]
+    # context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
+    # this_directory, mp_string, an_string, filter_string = context
+
+    df_images_all = read_mp2021_csv(this_directory, defaults_dict['df_images filename'])
+    df_comps_all = read_mp2021_csv(this_directory, defaults_dict['df_comps filename'],
+                                   dtype_dict={'CompID': str})
+    df_comp_obs_all = read_mp2021_csv(this_directory, defaults_dict['df_comp_obs filename'],
+                                      dtype_dict={'CompID': str, 'ObsID': str})
+    df_mp_obs_all = read_mp2021_csv(this_directory, defaults_dict['df_mp_obs filename'],
+                                    dtype_dict={'ObsID': str})
+
+    # Keep only rows in specified filters:
+    image_rows_to_keep = df_images_all['Filter'].isin(filters_to_include)
+    df_images = df_images_all.loc[image_rows_to_keep, :]
+    filters_string = str(filters_to_include)
+    if len(df_images) <= 0:
+        raise data_error_exception_type('No images found in specified filter(s): ' + filters_string)
+    comp_obs_rows_to_keep = df_comp_obs_all['FITSfile'].isin(df_images['FITSfile'])
+    df_comp_obs = df_comp_obs_all.loc[comp_obs_rows_to_keep, :]
+    if len(df_comp_obs) <= 0:
+        raise data_error_exception_type('No comp obs found in specified filters(s)' + filters_string)
+    mp_obs_rows_to_keep = df_mp_obs_all['FITSfile'].isin(df_images['FITSfile'])
+    df_mp_obs = df_mp_obs_all.loc[mp_obs_rows_to_keep, :]
+    if len(df_mp_obs) <= 0:
+        raise data_error_exception_type('No MP obs found in specified filters(s)' + filters_string)
+
+    # Remove images and all obs from images having no MP obs, if requested:
+    if require_mp_obs_each_image:
+        images_with_mp_obs = df_mp_obs['FITSfile'].drop_duplicates()
+        image_rows_to_keep = df_images['FITSfile'].isin(images_with_mp_obs)
+        df_images = df_images.loc[image_rows_to_keep, :]
+        comp_obs_rows_to_keep = df_comp_obs['FITSfile'].isin(images_with_mp_obs)
+        df_comp_obs = df_comp_obs.loc[comp_obs_rows_to_keep, :]
+        mp_obs_rows_to_keep = df_mp_obs['FITSfile'].isin(images_with_mp_obs)
+        df_mp_obs = df_mp_obs.loc[mp_obs_rows_to_keep, :]
+
+    # Perform merges to produce master comp dataframes:
+    df_comp_obs = pd.merge(left=df_comp_obs, right=df_images, how='left', on='FITSfile')
+    df_comp_master = pd.merge(left=df_comp_obs, right=df_comps_all.drop(columns=['RA_deg', 'Dec_deg']),
+                              how='left', on='CompID')
+    df_comp_master.index = df_comp_master['ObsID'].values
+    df_mp_master = pd.merge(left=df_mp_obs, right=df_images, how='left', on='FITSfile')
+    df_mp_master.index = df_mp_master['ObsID'].values
+    return df_comp_master, df_mp_master
+
+
+def make_df_model_raw(df_comp_master):
+    """ Assemble and return df_model, the comp-only dataframe containing all input data need for the
+        mixed-model regression at the center of this lightcurve workflow.
+        Keep only comps that are present in every image.
+    :param df_comp_master:
+    :return: df_model, one row per comp observation [pandas Dataframe]
+    """
+    # Count comp obs in each image:
+    comp_id_list = df_comp_master['CompID'].drop_duplicates()
+    image_count = len(df_comp_master['FITSfile'].drop_duplicates())
+    comp_obs_count_each_image = df_comp_master.groupby('CompID')[['FITSfile', 'CompID']].count()
+    comp_ids_in_every_image = [id for id in comp_id_list
+                               if comp_obs_count_each_image.loc[id, 'FITSfile'] == image_count]
+    rows_with_qualified_comp_ids = df_comp_master['CompID'].isin(comp_ids_in_every_image)
+    df_model = df_comp_master.loc[rows_with_qualified_comp_ids, :]
+    return df_model
+
+
+def mark_user_selections(df_model, session_dict):
+    """ Add UseInModel column to df_model, to be True for each row iff row (obs) passes all user criteria
+        allowing it to be actually used in constructing the mixed-model.
+    :param df_model: [pandas DataFrame]
+    :return: df_model with new UseInModel column. [pandas DataFrame]
+    """
+    deselect_for_obs_id = df_model['ObsID'].isin(session_dict['omit obs'])
+    deselect_for_comp_id = df_model['CompID'].isin(session_dict['omit comps'])
+    images_to_omit = session_dict['omit images'] + [name + '.fts' for name in session_dict['omit images']]
+    deselect_for_image = df_model['FITSfile'].isin(images_to_omit)
+    deselect_for_low_r_mag = (df_model['r'] < session_dict['min catalog r mag'])
+    deselect_for_high_r_mag = (df_model['r'] > session_dict['max catalog r mag'])
+    deselect_for_high_dr_mmag = (df_model['dr'] > session_dict['max catalog dr mmag'])
+    deselect_for_high_di_mmag = (df_model['di'] > session_dict['max catalog di mmag'])
+    deselect_for_low_ri_color = (df_model['ri_color'] < session_dict['min catalog ri color'])
+    deselect_for_high_ri_color = (df_model['ri_color'] > session_dict['max catalog ri color'])
+    obs_to_deselect = pd.Series(deselect_for_obs_id | deselect_for_comp_id | deselect_for_image
+                                | deselect_for_low_r_mag | deselect_for_high_r_mag
+                                | deselect_for_high_dr_mmag | deselect_for_high_di_mmag
+                                | deselect_for_low_ri_color | deselect_for_high_ri_color)
+    df_model = df_model.copy(deep=True)  # to shut up pandas and its fake warnings.
+    df_model.loc[:, 'UseInModel'] = ~ obs_to_deselect
+    return df_model

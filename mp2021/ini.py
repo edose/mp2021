@@ -1,5 +1,7 @@
 __author__ = "Eric Dose, Albuquerque"
 
+import configparser
+
 """ This module: manages INI files for other modules. """
 
 # Python core:
@@ -18,6 +20,10 @@ DEFAULTS_INI_FILENAME = 'defaults.ini'
 
 class IniParseError(Exception):
     """ For parsing errors only; does not apply to float conversions etc. """
+
+
+class ColorDefinitionError(Exception):
+    """ For any problem with Color Definition File. """
 
 
 def make_defaults_dict(ini_dir=INI_DIRECTORY, filename=DEFAULTS_INI_FILENAME):
@@ -197,7 +203,7 @@ def make_color_dict(defaults_dict, color_directory):
     """ Read the color control file for this color subdirectory, return color dict.
     :param defaults_dict:
     :param color_directory:
-    :return: color_dict [py dict].
+    :return: color_dict. [py dict]
     Structure of color_dict:
       { 'mp xy': [(filename1, x1, y1), (filename2, x2, y2)],
         'omit comps': ['22', '44', '4221'],
@@ -226,7 +232,42 @@ def make_color_dict(defaults_dict, color_directory):
     return color_dict
 
 
+def make_color_def_dict(color_dict):
+    """ Read the color definition .ini file for this color subdirectory, return color def dict.
+    :param color_dict:
+    :return: color_def_dict. [py dict]
+    Structure of color_def_dict:
+      { 'target colors': [('SG', 'SR'), ('SR', 'SI)], (for target colors SG-SR, SR-SI)
+        'filters': {'V': {'name': 'Johnson-Cousins V',
+                          'target passband': 'SG',
+                          'transform ci': 'SG', 'SR')},
+                   {'R': {'name': 'Johnson-Cousins R',
+                          'target passband': 'SR',
+                          'transform ci': 'SR', 'SI')},
+                   {'I': {'name': 'Johnson-Cousins I',
+                          'target passband': 'SI',
+                          'transform ci': 'SR', 'SI')}
+      }
+    """
+    color_def_filename = color_dict['color definition filename']
+    fullpath = os.path.join(INI_DIRECTORY, 'color', color_def_filename)
+    ini_config = configparser.ConfigParser()
+    try:
+        color_def = ini_config.read(fullpath)
+    except FileNotFoundError:
+        ColorDefinitionError('Requested file not found: ' + fullpath)
+    color_def_dict = {}
+    target_color_strings = ini_config.get('Targets', 'Target Colors').split('\n')
+    color_def_dict['target_colors'] = [tuple(i.strip() for i in s.split('-'))
+                                       for s in target_color_strings]
+    filter_sections = [fs for fs in ini_config.sections() if fs.lower().startswith('filter')]
+    filters = [fs[6:].strip() for fs in filter_sections]
+    for f, fs in zip(filters, filter_sections):
+        color_def_dict[f] = {'name': ini_config.get(fs, 'Name'),
+                             'target passband': ini_config.get(fs, 'Target Passband'),
+                             'transform ci': tuple(ini_config.get(fs, 'Transform CI').split('-'))}
 
+    return color_def_dict
 
 
 _____INI_UTILITIES______________________________________ = 0

@@ -1,7 +1,5 @@
 __author__ = "Eric Dose, Albuquerque"
 
-
-
 """ This module: Workflow for MP (minor planet) photometry. 
     The workflow is applied to a "session" = one MP's images from one imaging night.
     Intended for lightcurves in support of determining MP rotation rates.    
@@ -25,12 +23,12 @@ from scipy.stats import norm
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
-from mp2021.util import Instrument, all_mpfile_names
-from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
-    make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, initial_screen_comps, \
-    make_df_mp_obs, write_df_images_csv, write_df_comps_csv, write_df_comp_obs_csv, \
-    write_df_mp_obs_csv, write_text_file, read_mp2021_csv, validate_mp_xy, add_obsairmass_df_comp_obs, \
-    add_obsairmass_df_mp_obs, add_ri_color_df_comps
+import mp2021.common as common
+# from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
+#     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, initial_screen_comps, \
+#     make_df_mp_obs, write_df_images_csv, write_df_comps_csv, write_df_comp_obs_csv, \
+#     write_df_mp_obs_csv, write_text_file, validate_mp_xy, add_obsairmass_df_comp_obs, \
+#     add_obsairmass_df_mp_obs, add_ri_color_df_comps, make_df_masters
 
 from astropak.util import datetime_utc_from_jd, ra_as_hours, dec_as_hex
 from astropak.stats import MixedModelFit
@@ -154,7 +152,7 @@ def assess(return_results=False):
         return
     this_directory, mp_string, an_string, filter_string = context
     defaults_dict = ini.make_defaults_dict()
-    df, return_dict = do_fits_assessments(defaults_dict, this_directory)
+    df, return_dict = common.do_fits_assessments(defaults_dict, this_directory)
 
     # Summarize and write instructions for user's next steps:
     session_ini_filename = defaults_dict['session control filename']
@@ -186,7 +184,7 @@ def make_dfs(print_ap_details=False):
     context, defaults_dict, session_dict, log_file = _session_setup('make_dfs')
     this_directory, mp_string, an_string, filter_string = context
     instrument_dict = ini.make_instrument_dict(defaults_dict)
-    instrument = Instrument(instrument_dict)
+    instrument = util.Instrument(instrument_dict)
     disc_radius, gap, background_width = instrument.nominal_ap_profile
     site_dict = ini.make_site_dict(defaults_dict)
 
@@ -195,45 +193,46 @@ def make_dfs(print_ap_details=False):
         raise SessionDataError('No FITS files found in session directory ' + this_directory)
 
     # Quick validation of MP XY filenames & values:
-    mp_xy_files_found, mp_xy_values_ok = validate_mp_xy(fits_filenames, session_dict)
+    mp_xy_files_found, mp_xy_values_ok = common.validate_mp_xy(fits_filenames, session_dict)
     if not mp_xy_files_found:
         raise SessionIniFileError('At least 1 MP XY file not found in session directory ' + this_directory)
     if not mp_xy_values_ok:
         raise SessionIniFileError('MP XY invalid -- did you enter values and save session.ini?')
 
-    fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
-    df_images = make_df_images(fits_objects)
+    fits_objects, fits_object_dict = common.make_fits_objects(this_directory, fits_filenames)
+    df_images = common.make_df_images(fits_objects)
 
     # Get and screen catalog entries for comp stars:
-    refcat2 = get_refcat2_comp_stars(fits_objects)
-    info_lines = initial_screen_comps(refcat2)  # in-place screening.
+    refcat2 = common.get_refcat2_comp_stars(fits_objects)
+    info_lines = common.initial_screen_comps(refcat2)  # in-place screening.
     print('\n'.join(info_lines), '\n')
     log_file.write('\n'.join(info_lines) + '\n')
 
     # Make comp-star apertures, comps dataframe, and comp obs dataframe:
-    df_comps = make_df_comps(refcat2)
-    comp_apertures_dict = make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
-    df_comp_obs = make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
+    df_comps = common.make_df_comps(refcat2)
+    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
+    df_comp_obs = common.make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
 
     # Make MP apertures and MP obs dataframe:
     starting_mp_obs_id = max(df_comp_obs['ObsID'].astype(int)) + 1
-    mp_apertures_dict, mp_mid_radec_dict = make_mp_apertures(fits_object_dict, mp_string, session_dict,
-                                                             disc_radius, gap, background_width, log_file,
-                                                             starting_obs_id=starting_mp_obs_id,
-                                                             print_ap_details=print_ap_details)
-    df_mp_obs = make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
+    mp_apertures_dict, mp_mid_radec_dict = common.make_mp_apertures(fits_object_dict, mp_string,
+                                                                    session_dict, disc_radius,
+                                                                    gap, background_width, log_file,
+                                                                    starting_obs_id=starting_mp_obs_id,
+                                                                    print_ap_details=print_ap_details)
+    df_mp_obs = common.make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
 
     # Post-process dataframes:
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
-    add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
-    add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
-    add_ri_color_df_comps(df_comps)
+    common.add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
+    common.add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
+    common.add_ri_color_df_comps(df_comps)
 
     # Write dataframes to CSV files:
-    write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
-    write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
-    write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
-    write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
+    common.write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
+    common.write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
+    common.write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
+    common.write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
 
     log_file.close()
     print('\nNext: (1) enter comp selection limits and model options in ' +
@@ -263,10 +262,12 @@ def do_session():
     mp_string = str(mp_int)
     site_dict = ini.make_site_dict(defaults_dict)
 
-    df_comp_master, df_mp_master = _make_df_masters(filters_to_include=filter_string,
-                                                    require_mp_obs_each_image=True)
-    df_model = _make_df_model(df_comp_master)  # comps only.
-    df_model = _mark_user_selections(df_model, session_dict)
+    df_comp_master, df_mp_master = common.make_df_masters(this_directory, defaults_dict,
+                                                          filters_to_include=filter_string,
+                                                          require_mp_obs_each_image=True,
+                                                          data_error_exception_type=SessionDataError)
+    df_model_raw = common.make_df_model_raw(df_comp_master)  # comps only.
+    df_model = common.mark_user_selections(df_model_raw, session_dict)
     model = SessionModel(df_model, filter_string, session_dict, df_mp_master, this_directory)
 
     _write_mpfile_line(mp_string, an_string, model)
@@ -288,107 +289,6 @@ def _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_m
 
 
 _____SUPPORT_for_do_session______________________________________________ = 0
-
-
-def _make_df_masters(filters_to_include=None, require_mp_obs_each_image=True):
-    """ Get, screen and merge dataframes df_images_all, df_comps_all, df_comp_obs_all, and df_mp_obs_all
-        into two master dataframes dataframe df_comp_master and df_mp_master.
-        USAGE (typical):
-    :param filters_to_include: either one filter name, or a list of filters.
-               Only observations in that filter or filters will be retained.
-               None includes ALL filters given in input dataframes [None, or string, or list of strings]
-    :param require_mp_obs_each_image: True to remove all obs from images without MP observation. [boolean]
-    :return: df_comp_master, df_mp_master, the two master tables of data, one row per retained observation.
-                 [2-tuple of pandas DataFrames]
-"""
-    if isinstance(filters_to_include, str):
-        filters_to_include = [filters_to_include]
-    context, defaults_dict, session_dict, log_file = _session_setup('do_session()')
-    this_directory, mp_string, an_string, filter_string = context
-
-    df_images_all = read_mp2021_csv(this_directory, defaults_dict['df_images filename'])
-    df_comps_all = read_mp2021_csv(this_directory, defaults_dict['df_comps filename'],
-                                   dtype_dict={'CompID': str})
-    df_comp_obs_all = read_mp2021_csv(this_directory, defaults_dict['df_comp_obs filename'],
-                                      dtype_dict={'CompID': str, 'ObsID': str})
-    df_mp_obs_all = read_mp2021_csv(this_directory, defaults_dict['df_mp_obs filename'],
-                                    dtype_dict={'ObsID': str})
-
-    # Keep only rows in specified filters:
-    image_rows_to_keep = df_images_all['Filter'].isin(filters_to_include)
-    df_images = df_images_all.loc[image_rows_to_keep, :]
-    if len(df_images) <= 0:
-        raise SessionDataError('No images found in specified filter(s): ' + str(filters_to_include))
-    comp_obs_rows_to_keep = df_comp_obs_all['FITSfile'].isin(df_images['FITSfile'])
-    df_comp_obs = df_comp_obs_all.loc[comp_obs_rows_to_keep, :]
-    if len(df_comp_obs) <= 0:
-        raise SessionDataError('No comp obs found in specified filters(s)' + str(filters_to_include))
-    mp_obs_rows_to_keep = df_mp_obs_all['FITSfile'].isin(df_images['FITSfile'])
-    df_mp_obs = df_mp_obs_all.loc[mp_obs_rows_to_keep, :]
-    if len(df_mp_obs) <= 0:
-        raise SessionDataError('No MP obs found in specified filters(s)' + str(filters_to_include))
-
-    # Remove images and all obs from images having no MP obs, if requested:
-    if require_mp_obs_each_image:
-        images_with_mp_obs = df_mp_obs['FITSfile'].drop_duplicates()
-        image_rows_to_keep = df_images['FITSfile'].isin(images_with_mp_obs)
-        df_images = df_images.loc[image_rows_to_keep, :]
-        comp_obs_rows_to_keep = df_comp_obs['FITSfile'].isin(images_with_mp_obs)
-        df_comp_obs = df_comp_obs.loc[comp_obs_rows_to_keep, :]
-        mp_obs_rows_to_keep = df_mp_obs['FITSfile'].isin(images_with_mp_obs)
-        df_mp_obs = df_mp_obs.loc[mp_obs_rows_to_keep, :]
-
-    # Perform merges to produce master comp dataframes:
-    df_comp_obs = pd.merge(left=df_comp_obs, right=df_images, how='left', on='FITSfile')
-    df_comp_master = pd.merge(left=df_comp_obs, right=df_comps_all.drop(columns=['RA_deg', 'Dec_deg']),
-                              how='left', on='CompID')
-    df_comp_master.index = df_comp_master['ObsID'].values
-    df_mp_master = pd.merge(left=df_mp_obs, right=df_images, how='left', on='FITSfile')
-    df_mp_master.index = df_mp_master['ObsID'].values
-    return df_comp_master, df_mp_master
-
-
-def _make_df_model(df_comp_master):
-    """ Assemble and return df_model, the comp-only dataframe containing all input data need for the
-        mixed-model regression at the center of this lightcurve workflow.
-        Keep only comps that are present in every image.
-    :param df_comp_master:
-    :return: df_model, one row per comp observation [pandas Dataframe]
-    """
-    # Count comp obs in each image:
-    comp_id_list = df_comp_master['CompID'].drop_duplicates()
-    image_count = len(df_comp_master['FITSfile'].drop_duplicates())
-    comp_obs_count_each_image = df_comp_master.groupby('CompID')[['FITSfile', 'CompID']].count()
-    comp_ids_in_every_image = [id for id in comp_id_list
-                               if comp_obs_count_each_image.loc[id, 'FITSfile'] == image_count]
-    rows_with_qualified_comp_ids = df_comp_master['CompID'].isin(comp_ids_in_every_image)
-    df_model = df_comp_master.loc[rows_with_qualified_comp_ids, :]
-    return df_model
-
-
-def _mark_user_selections(df_model, session_dict):
-    """ Add UseInModel column to df_model, to be True for each row iff row (obs) passes all user criteria
-        allowing it to be actually used in constructing the mixed-model.
-    :param df_model: [pandas DataFrame]
-    :return: df_model with new UseInModel column. [pandas DataFrame]
-    """
-    deselect_for_obs_id = df_model['ObsID'].isin(session_dict['omit obs'])
-    deselect_for_comp_id = df_model['CompID'].isin(session_dict['omit comps'])
-    images_to_omit = session_dict['omit images'] + [name + '.fts' for name in session_dict['omit images']]
-    deselect_for_image = df_model['FITSfile'].isin(images_to_omit)
-    deselect_for_low_r_mag = (df_model['r'] < session_dict['min catalog r mag'])
-    deselect_for_high_r_mag = (df_model['r'] > session_dict['max catalog r mag'])
-    deselect_for_high_dr_mmag = (df_model['dr'] > session_dict['max catalog dr mmag'])
-    deselect_for_high_di_mmag = (df_model['di'] > session_dict['max catalog di mmag'])
-    deselect_for_low_ri_color = (df_model['ri_color'] < session_dict['min catalog ri color'])
-    deselect_for_high_ri_color = (df_model['ri_color'] > session_dict['max catalog ri color'])
-    obs_to_deselect = pd.Series(deselect_for_obs_id | deselect_for_comp_id | deselect_for_image
-                                | deselect_for_low_r_mag | deselect_for_high_r_mag
-                                | deselect_for_high_dr_mmag | deselect_for_high_di_mmag
-                                | deselect_for_low_ri_color | deselect_for_high_ri_color)
-    df_model = df_model.copy(deep=True)  # to shut up pandas and its fake warnings.
-    df_model.loc[:, 'UseInModel'] = ~ obs_to_deselect
-    return df_model
 
 
 class SessionModel:
@@ -497,12 +397,12 @@ class SessionModel:
             print(msg)
             fit_summary_lines.append(msg)
 
-        write_text_file(self.this_directory, 'fit_summary.txt',
-                        'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
-                        '\n'.join(fit_summary_lines) + '\n\n' +
-                        self.mm_fit.statsmodels_object.summary().as_text() +
-                        '\ncomps = ' + str(n_comps_used) + ' used' +
-                        '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
+        common.write_text_file(self.this_directory, 'fit_summary.txt',
+                               'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
+                               '\n'.join(fit_summary_lines) + '\n\n' +
+                               self.mm_fit.statsmodels_object.summary().as_text() +
+                               '\ncomps = ' + str(n_comps_used) + ' used' +
+                               '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
 
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
@@ -561,7 +461,7 @@ def _write_canopus_file(mp_string, an_string, this_directory, model):
 
 
 def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model):
-    mpfile_names = all_mpfile_names(defaults_dict['mpfile directory'])
+    mpfile_names = util.all_mpfile_names(defaults_dict['mpfile directory'])
     name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string + '_')]
     if len(name_list) <= 0:
         print(' >>>>> WARNING: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')

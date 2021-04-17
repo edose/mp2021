@@ -9,13 +9,12 @@ from datetime import datetime, timezone
 # Author's packages:
 import mp2021.util as util
 import mp2021.ini as ini
-from mp2021.session import _remove_images_without_mp_obs
-from mp2021.util import Instrument
-from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
-    make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, \
-    initial_screen_comps, make_df_mp_obs, validate_mp_xy, add_obsairmass_df_comp_obs, \
-    add_obsairmass_df_mp_obs, add_gr_color_df_comps, add_ri_color_df_comps, write_df_images_csv, \
-    write_df_comps_csv, write_df_comp_obs_csv, write_df_mp_obs_csv
+import mp2021.common as common
+# from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
+#     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, \
+#     initial_screen_comps, make_df_mp_obs, validate_mp_xy, add_obsairmass_df_comp_obs, \
+#     add_obsairmass_df_mp_obs, add_gr_color_df_comps, add_ri_color_df_comps, write_df_images_csv, \
+#     write_df_comps_csv, write_df_comp_obs_csv, write_df_mp_obs_csv, make_df_masters
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
@@ -39,8 +38,7 @@ class ColorSpecificationError(Exception):
 
 def start(color_top_directory=None, mp_id=None, an_date=None,
           color_def_filename='ColorDef_Sloan2colors_fromVRI.ini'):
-    # Adapted from mp2021.session.start().
-    """ Launch one session of MP color workflow.
+    """ Launch one MP color workflow (one color subdirectory).
         Adapted from package mp2021, session.start().
         Example usage: color.start('C:/Astro/MP Color/', 1111, 20210617)
     :param color_top_directory: path of lowest directory common to all MP color FITS, e.g.,
@@ -72,7 +70,7 @@ def start(color_top_directory=None, mp_id=None, an_date=None,
         log_file.write(mp_directory + '\n')
         log_file.write('MP: ' + mp_string + '\n')
         log_file.write('AN: ' + an_string + '\n')
-        log_file.write('Definition: ' + color_def_filename)
+        log_file.write('Definition: ' + color_def_filename + '\n')
         log_file.write('This log started: ' +
                        '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n\n')
     print('Log file started.')
@@ -90,7 +88,7 @@ def resume(color_top_directory=None, mp_id=None, an_date=None,
     """
     defaults_dict = ini.make_defaults_dict()
     if color_top_directory is None:
-        color_top_directory = defaults_dict['session top directory']
+        color_top_directory = defaults_dict['color top directory']
     if mp_id is None or an_date is None:
         print(' >>>>> Usage: resume(top_directory, mp_id, an_date)')
         return
@@ -101,7 +99,7 @@ def resume(color_top_directory=None, mp_id=None, an_date=None,
     this_directory = os.path.join(color_top_directory, 'MP_' + mp_string, 'AN' + an_string)
     os.chdir(this_directory)
     print('Working directory set to:', this_directory)
-    log_this_directory, log_mp_string, log_an_string, log_definition_string = _get_color_context()
+    log_this_directory, log_mp_string, log_an_string = _get_color_context()
     if log_mp_string.upper() != mp_string:
         raise ColorLogFileError(' '.join(['MP string does not match that of color log.',
                                           log_mp_string, mp_string]))
@@ -122,9 +120,9 @@ def assess(return_results=False):
     except ColorLogFileError as e:
         print(' >>>>> ERROR: ' + str(e))
         return
-    this_directory, mp_string, an_string, definition_string = context
+    this_directory, mp_string, an_string = context
     defaults_dict = ini.make_defaults_dict()
-    df, return_dict = do_fits_assessments(defaults_dict, this_directory)
+    df, return_dict = common.do_fits_assessments(defaults_dict, this_directory)
 
     # Summarize and write instructions for user's next steps:
     color_ini_filename = defaults_dict['color control filename']
@@ -151,10 +149,10 @@ def make_dfs(print_ap_details=False):
     """ Perform aperture photometry for one subdirectory of color photometry.
         :param print_ap_details: True if user wants aperture details for each MP. [boolean]
         """
-    context, defaults_dict, color_dict, log_file = _color_setup('make_dfs')
-    this_directory, mp_string, an_string, definition_string = context
+    context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('make_dfs')
+    this_directory, mp_string, an_string = context
     instrument_dict = ini.make_instrument_dict(defaults_dict)
-    instrument = Instrument(instrument_dict)
+    instrument = util.Instrument(instrument_dict)
     disc_radius, gap, background_width = instrument.nominal_ap_profile
     site_dict = ini.make_site_dict(defaults_dict)
 
@@ -163,53 +161,116 @@ def make_dfs(print_ap_details=False):
         raise ColorDataError('No FITS files found in color directory ' + this_directory)
 
     # Quick validation of MP XY filenames & values:
-    mp_xy_files_found, mp_xy_values_ok = validate_mp_xy(fits_filenames, color_dict)
+    mp_xy_files_found, mp_xy_values_ok = common.validate_mp_xy(fits_filenames, color_dict)
     if not mp_xy_files_found:
         raise ColorIniFileError('At least 1 MP XY file not found in color directory ' + this_directory)
     if not mp_xy_values_ok:
         raise ColorIniFileError('MP XY invalid -- did you enter values and save color.ini?')
 
-    fits_objects, fits_object_dict = make_fits_objects(this_directory, fits_filenames)
-    df_images = make_df_images(fits_objects)
+    fits_objects, fits_object_dict = common.make_fits_objects(this_directory, fits_filenames)
+    df_images = common.make_df_images(fits_objects)
 
     # Get and screen catalog entries for comp stars:
-    refcat2 = get_refcat2_comp_stars(fits_objects)
-    info_lines = initial_screen_comps(refcat2)  # in-place screening.
+    refcat2 = common.get_refcat2_comp_stars(fits_objects)
+    info_lines = common.initial_screen_comps(refcat2)  # in-place screening.
     print('\n'.join(info_lines), '\n')
     log_file.write('\n'.join(info_lines) + '\n')
 
     # Make comp-star apertures, comps dataframe, and comp obs dataframe:
-    df_comps = make_df_comps(refcat2)
-    comp_apertures_dict = make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
-    df_comp_obs = make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
+    df_comps = common.make_df_comps(refcat2)
+    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
+    df_comp_obs = common.make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
 
     # Make MP apertures and MP obs dataframe:
     starting_mp_obs_id = max(df_comp_obs['ObsID'].astype(int)) + 1
-    mp_apertures_dict, mp_mid_radec_dict = make_mp_apertures(fits_object_dict, mp_string, color_dict,
-                                                             disc_radius, gap, background_width, log_file,
-                                                             starting_obs_id=starting_mp_obs_id,
-                                                             print_ap_details=print_ap_details)
-    df_mp_obs = make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
+    mp_apertures_dict, mp_mid_radec_dict =common.make_mp_apertures(fits_object_dict, mp_string,
+                                                                   color_dict, disc_radius, gap,
+                                                                   background_width, log_file,
+                                                                   starting_obs_id=starting_mp_obs_id,
+                                                                   print_ap_details=print_ap_details)
+    df_mp_obs = common.make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
 
     # WANTED??: _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
-    add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
-    add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
-    add_gr_color_df_comps(df_comps)
-    add_ri_color_df_comps(df_comps)
+    common.add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
+    common.add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
+    common.add_gr_color_df_comps(df_comps)
+    common.add_ri_color_df_comps(df_comps)
 
     # Write dataframes to CSV files:
-    write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
-    write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
-    write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
-    write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
+    common.write_df_images_csv(df_images, this_directory, defaults_dict, log_file)
+    common.write_df_comps_csv(df_comps, this_directory, defaults_dict, log_file)
+    common.write_df_comp_obs_csv(df_comp_obs, this_directory, defaults_dict, log_file)
+    common.write_df_mp_obs_csv(df_mp_obs, this_directory, defaults_dict, log_file)
 
     log_file.close()
-    print('\nNext: (1) enter comp selection limits and regression model options in ' +
-          defaults_dict['color control filename'],
+    print('\nNext: (1) ' + defaults_dict['color control filename'] +
+          ': enter comp selection limits and regression model options.',
           '\n      (2) run do_color()\n')
 
 
+def do_color():
+    """ Primary color photometry for one color subdirectory.
+    Takes the 4 CSV files from make_dfs().
+    Generates diagnostic plots for iterative regression refinement.
+    Typically iterated, pruning comp-star ranges and outliers, until converged and then simply stop.
+    :returns None. Writes all info to files.
+    USAGE: do_color()   [no return value]
+    """
+    context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('make_dfs')
+    this_directory, mp_string, an_string = context
+    filters_to_include = color_def_dict['filters']
+    # instrument_dict = ini.make_instrument_dict(defaults_dict)
+    # instrument = Instrument(instrument_dict)
+    # disc_radius, gap, background_width = instrument.nominal_ap_profile
+    # site_dict = ini.make_site_dict(defaults_dict)
+
+    df_comp_master, df_mp_master = common.make_df_masters(this_directory, defaults_dict,
+                                                          filters_to_include=filters_to_include,
+                                                          require_mp_obs_each_image=True,
+                                                          data_error_exception_type=ColorDataError)
+    df_model_raw = common.make_df_model_raw(df_comp_master)  # comps-only data from all used filters.
+    df_model = common.mark_user_selections(df_model_raw, color_dict)
+    model = ColorModel_1(df_model, color_dict, color_def_dict, df_mp_master, this_directory)
+
+
+
+
+
+
 __________SUPPORT_for_do_color____________________________________________ = 0
+
+
+class ColorModel_1:
+    """ Generates and holds mixed-model regression model suitable to MP color index determination.
+        Affords prediction for MP magnitudes. """
+    def __init__(self, df_model, color_dict, color_def_dict, df_mp_master, this_directory):
+        self.df_model = df_model
+        self.color_dict = color_dict
+        self.color_def_dict = color_def_dict
+        self.df_used_comps_obs = self.df_model.copy().loc[self.df_model['UseInModel'], :]
+        images_in_used_comps = self.df_used_comps_obs['FITSfile'].drop_duplicates()
+        mp_rows_to_use = df_mp_master['FITSfile'].isin(images_in_used_comps)
+        self.df_used_mp_obs = df_mp_master.loc[mp_rows_to_use, :]
+        self.this_directory = this_directory
+
+        self.dep_var_name = 'InstMag_with_offsets'
+        self.mm_fit = None      # placeholder for the fit result [a MixedModelFit object].
+        self.vignette = None    # placeholder for this fit parameter results [a scalar].
+
+        self._prep_and_do_regression()
+        self.df_mp_mags = self._calc_mp_mags()
+
+    def _prep_and_do_regression(self):
+        """ Using MixedModelFit class (which wraps statsmodels.MixedLM.from_formula()).
+            Uses ONLY selected comp data in this model.
+            (Use model's .predict() to calculate best MP mags from model and MP observations.)
+        :return: [None]
+        """
+
+
+    def _calc_mp_mags(self):
+        """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
+        return 1111
 
 
 __________SUPPORT_FUNCTIONS_and_CLASSES = 0
@@ -220,7 +281,7 @@ def _get_color_context():
         Assumes python current working directory = the relevant AN subdirectory with session.log in place.
         Adapted from package mp_phot, workflow_session.py._get_session_context(). Required for .resume().
         TESTED OK 2021-01-08.
-    :return: 4-tuple: (this_directory, mp_string, an_string, filter_string) [4 strings]
+    :return: 3-tuple: (this_directory, mp_string, an_string) [3 strings]
     """
     this_directory = os.getcwd()
     defaults_dict = ini.make_defaults_dict()
@@ -242,8 +303,8 @@ def _get_color_context():
         raise ColorLogFileError('Header line does not match current working directory.')
     mp_string = lines[2][3:].strip().upper()
     an_string = lines[3][3:].strip()
-    definition_string = lines[4][len('Definition:'):].strip()
-    return this_directory, mp_string, an_string, definition_string
+    # definition_string = lines[4][len('Definition:'):].strip()
+    return this_directory, mp_string, an_string
 
 
 def _write_color_ini_stub(this_directory, filenames_temporal_order):
@@ -270,6 +331,10 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order):
         '[Ini Template]',
         'Filename = color.template',
         '']
+    color_definition_lines = [
+        '[Color Definition]',
+        'Color Definition Filename = ' + defaults_dict['color definition filename'],
+        '']
     mp_location_lines = [
         '[MP Location]',
         '# Exactly 2 MP XY, one per line (typically earliest and latest FITS):',
@@ -286,15 +351,16 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order):
         'Max Catalog r mag = 16',
         'Max Catalog dr mmag = 16',
         'Max Catalog di mmag = 16',
-        'Min Catalog ri color = 0.10',
-        'Max Catalog ri color = 0.34',
+        'Min Catalog ri color = -0.20',
+        'Max Catalog ri color = +0.64',
         '']
     regression_lines = [
         '[Regression]',
         '# Extinctions from Site .ini file.',
         '# Transforms from Instrument .ini file',
         'Fit Vignette = Yes']
-    raw_lines = header_lines + ini_lines + mp_location_lines + selection_criteria_lines + regression_lines
+    raw_lines = header_lines + ini_lines + color_definition_lines +\
+        mp_location_lines + selection_criteria_lines + regression_lines
     ready_lines = [line + '\n' for line in raw_lines]
     if not os.path.exists(fullpath):
         with open(fullpath, 'w') as f:
@@ -308,13 +374,14 @@ def _color_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     context = _get_color_context()
     if context is None:
         return
-    this_directory, mp_string, an_string, definition_string = context
+    this_directory, mp_string, an_string = context
     defaults_dict = ini.make_defaults_dict()
     color_dict = ini.make_color_dict(defaults_dict, this_directory)
+    color_def_dict = ini.make_color_def_dict(color_dict)
     log_filename = defaults_dict['color log filename']
     log_file = open(log_filename, mode='a')  # set up append to log file.
     log_file.write('\n===== ' + calling_function_name + '()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
-    return context, defaults_dict, color_dict, log_file
+    return context, defaults_dict, color_dict, color_def_dict, log_file
 
 
