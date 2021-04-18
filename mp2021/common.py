@@ -6,7 +6,6 @@ from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
 from astropak.reference import DEGREES_PER_RADIAN
-from mp2021.session import _session_setup
 
 """ This module: 
       

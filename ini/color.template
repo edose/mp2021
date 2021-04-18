@@ -17,4 +17,6 @@ Min Catalog ri color = float -> min catalog ri color
 Max Catalog ri color = float -> max catalog ri color
 
 [Regression]
-Fit Vignette   = boolean -> fit vignette
+Extinctions    = string list -> extinctions
+Transforms     = string list -> transforms
+Fit Vignette   = boolean     -> fit vignette

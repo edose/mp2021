@@ -1,11 +1,11 @@
 __author__ = "Eric Dose, Albuquerque"
 
-import configparser
-
 """ This module: manages INI files for other modules. """
 
 # Python core:
 import os
+import configparser
+from collections import OrderedDict
 
 # External packages:
 
@@ -215,6 +215,8 @@ def make_color_dict(defaults_dict, color_directory):
         'min catalog ri color': 0.10,
         'max catalog ri color': 0.34,
         'mp ri color': +0.22,
+        'extinctions': {'V': 0.1615, 'R': 01292, 'I': 0.0869},
+        'transforms': {'V': -0.015, 'R': -0.15, 'I': 0.11},
         'fit vignette': True }
     """
     color_ini_filename = defaults_dict['color control filename']
@@ -229,10 +231,38 @@ def make_color_dict(defaults_dict, color_directory):
     # Selection Criteria section, Omit elements:
     color_dict = _extract_omit_comps_obs_images(color_dict, 'Color')
 
+    # Parse and replace 'extinctions':
+    extinction_lines = [line.strip() for line in color_dict['extinctions']]
+    extinction_dict = OrderedDict()
+    for line in extinction_lines:
+        items = line.replace(',', ' ').split()
+        if len(items) != 2:
+            raise IniParseError(color_ini_filename + ', Extinction line: ' + line)
+        try:
+            value = float(items[1])
+        except ValueError:
+            raise ValueError((color_ini_filename + ', Extinction value: ' + items[1]))
+        extinction_dict[items[0]] = value
+    color_dict['extinctions'] = extinction_dict
+
+    # Parse and replace 'transforms':
+    transform_lines = [line.strip() for line in color_dict['transforms']]
+    transform_dict = OrderedDict()
+    for line in transform_lines:
+        items = line.replace(',', ' ').split()
+        if len(items) != 2:
+            raise IniParseError(color_ini_filename + ', Transform line: ' + line)
+        try:
+            value = float(items[1])
+        except ValueError:
+            raise ValueError((color_ini_filename + ', Transform value: ' + items[1]))
+        transform_dict[items[0]] = value
+    color_dict['transforms'] = transform_dict
+
     return color_dict
 
 
-def make_color_def_dict(color_dict):
+def make_color_def_dict(defaults_dict):
     """ Read the color definition .ini file for this color subdirectory, return color def dict.
     :param color_dict:
     :return: color_def_dict. [py dict]
@@ -249,24 +279,24 @@ def make_color_def_dict(color_dict):
                           'transform ci': 'SR', 'SI')}
       }
     """
-    color_def_filename = color_dict['color definition filename']
-    fullpath = os.path.join(INI_DIRECTORY, 'color', color_def_filename)
+    color_def_filename = defaults_dict['color definition filename']
+    color_def_fullpath = os.path.join(INI_DIRECTORY, 'color', color_def_filename)
+    if not (os.path.exists(color_def_fullpath) and os.path.isfile(color_def_fullpath)):
+        raise ColorDefinitionError('Requested file not found: ' + color_def_fullpath)
     ini_config = configparser.ConfigParser()
-    try:
-        color_def = ini_config.read(fullpath)
-    except FileNotFoundError:
-        ColorDefinitionError('Requested file not found: ' + fullpath)
-    color_def_dict = {}
+    ini_config.read(color_def_fullpath)
+    color_def_dict = OrderedDict()
     target_color_strings = ini_config.get('Targets', 'Target Colors').split('\n')
     color_def_dict['target_colors'] = [tuple(i.strip() for i in s.split('-'))
                                        for s in target_color_strings]
     filter_sections = [fs for fs in ini_config.sections() if fs.lower().startswith('filter')]
     filters = [fs[6:].strip() for fs in filter_sections]
+    filters_dict = OrderedDict()
     for f, fs in zip(filters, filter_sections):
-        color_def_dict[f] = {'name': ini_config.get(fs, 'Name'),
-                             'target passband': ini_config.get(fs, 'Target Passband'),
-                             'transform ci': tuple(ini_config.get(fs, 'Transform CI').split('-'))}
-
+        filters_dict[f] = {'name': ini_config.get(fs, 'Name'),
+                           'target passband': ini_config.get(fs, 'Target Passband'),
+                           'transform ci': tuple(ini_config.get(fs, 'Transform CI').split('-'))}
+    color_def_dict['filters'] = filters_dict
     return color_def_dict
 
 

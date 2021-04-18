@@ -3,10 +3,13 @@ __author__ = "Eric Dose, Albuquerque"
 # Python core:
 import os
 from datetime import datetime, timezone
+from math import pi, cos
 
 # External packages:
 
 # Author's packages:
+import astropak.util
+from astropak.stats import MixedModelFit
 import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
@@ -16,8 +19,12 @@ import mp2021.common as common
 #     add_obsairmass_df_mp_obs, add_gr_color_df_comps, add_ri_color_df_comps, write_df_images_csv, \
 #     write_df_comps_csv, write_df_comp_obs_csv, write_df_mp_obs_csv, make_df_masters
 
+
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
+
+TRANSFORM_COLUMN_LOOKUP = {('SG', 'SR'): 'gr_color', ('SR', 'SI'): 'ri_color'}
+CATMAG_PASSBAND_COLUMN_LOOKUP = {'SG': 'g', 'SR': 'r', 'SI': 'i'}
 
 
 class ColorIniFileError(Exception):
@@ -140,7 +147,8 @@ def assess(return_results=False):
             log_file.write('assess(): ' + str(return_dict['warning count']) + ' warnings.' + '\n')
     df_temporal = df.loc[:, ['Filename', 'JD_mid']].sort_values(by=['JD_mid'])
     filenames_temporal_order = df_temporal['Filename']
-    _write_color_ini_stub(this_directory, filenames_temporal_order)  # if it doesn't already exist.
+    mean_datetime = astropak.util.datetime_utc_from_jd(df['JD_mid'].mean())
+    _write_color_ini_stub(this_directory, filenames_temporal_order, mean_datetime)  # if not already exists.
     if return_results:
         return return_dict
 
@@ -218,7 +226,7 @@ def do_color():
     """
     context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('make_dfs')
     this_directory, mp_string, an_string = context
-    filters_to_include = color_def_dict['filters']
+    filters_to_include = list(color_def_dict['filters'].keys())
     # instrument_dict = ini.make_instrument_dict(defaults_dict)
     # instrument = Instrument(instrument_dict)
     # disc_radius, gap, background_width = instrument.nominal_ap_profile
@@ -247,8 +255,8 @@ class ColorModel_1:
         self.df_model = df_model
         self.color_dict = color_dict
         self.color_def_dict = color_def_dict
-        self.df_used_comps_obs = self.df_model.copy().loc[self.df_model['UseInModel'], :]
-        images_in_used_comps = self.df_used_comps_obs['FITSfile'].drop_duplicates()
+        self.df_used_comp_obs = self.df_model.copy().loc[self.df_model['UseInModel'], :]
+        images_in_used_comps = self.df_used_comp_obs['FITSfile'].drop_duplicates()
         mp_rows_to_use = df_mp_master['FITSfile'].isin(images_in_used_comps)
         self.df_used_mp_obs = df_mp_master.loc[mp_rows_to_use, :]
         self.this_directory = this_directory
@@ -266,6 +274,99 @@ class ColorModel_1:
             (Use model's .predict() to calculate best MP mags from model and MP observations.)
         :return: [None]
         """
+        fit_summary_lines = []
+        # fixed_effect_var_list = []
+        filters_to_include = list(self.color_def_dict['filters'].keys())
+
+        # Prepare catmag offset to dep var:
+        self.df_used_comp_obs['CatMag'] = 0.0
+        for f in filters_to_include:
+            catmag_passband = self.color_def_dict['filters'][f]['target passband']
+            catmag_passband_column_name = CATMAG_PASSBAND_COLUMN_LOOKUP[catmag_passband]
+            is_in_filter = list(self.df_used_comp_obs['Filter'] == f)
+            self.df_used_comp_obs.loc[is_in_filter, 'CatMag'] = \
+                self.df_used_comp_obs.loc[is_in_filter, catmag_passband_column_name]
+        catmag_offset = self.df_used_comp_obs['CatMag'].astype(float)
+
+        # Prepare transform*color offset to dep var, from instrument ini file:
+        self.df_used_comp_obs['TransformValue'] = None
+        self.df_used_comp_obs['TransformColor'] = None
+        for f in filters_to_include:
+            transform_value = self.color_dict['transforms'][f]
+            transform_ci =  self.color_def_dict['filters'][f]['transform ci']
+            transform_ci_column_name = TRANSFORM_COLUMN_LOOKUP[transform_ci]
+            is_in_filter = (self.df_used_comp_obs['Filter'] == f)
+            self.df_used_comp_obs.loc[is_in_filter, 'TransformValue'] = transform_value
+            self.df_used_comp_obs.loc[is_in_filter, 'TransformColor'] = \
+                self.df_used_comp_obs.loc[is_in_filter, transform_ci_column_name]
+        transform_offset = (self.df_used_comp_obs['TransformValue'] *
+                            self.df_used_comp_obs['TransformColor']).astype(float)
+
+        # Prepare extinction*airmass offset to dep var, from site ini file:
+        self.df_used_comp_obs['ExtinctionValue'] = None
+        for f in filters_to_include:
+            extinction_value = self.color_dict['extinctions'][f]
+            is_in_filter = (self.df_used_comp_obs['Filter'] == f)
+            self.df_used_comp_obs.loc[is_in_filter, 'ExtinctionValue'] = extinction_value
+        extinction_offset = (self.df_used_comp_obs['ExtinctionValue'] *
+                             self.df_used_comp_obs['Airmass']).astype(float)
+
+        # Build fixed effect variables and values:
+        fixed_effect_var_list = ['Vignette']  # mandatory fixed-effect (independent) variable.
+        for f in filters_to_include[1:]:
+            is_in_filter = (self.df_used_comp_obs['Filter'] == f)
+            column_name = 'dZ_' + f
+            self.df_used_comp_obs[column_name] = 0.0
+            self.df_used_comp_obs.loc[is_in_filter, column_name] = 1.0
+            fixed_effect_var_list.append(column_name)
+
+        # Complete regression preparations:
+        random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
+        dep_var_offset = catmag_offset + transform_offset + extinction_offset
+        self.df_used_comp_obs[self.dep_var_name] = self.df_used_comp_obs['InstMag'] - dep_var_offset
+
+        # # TEMPORARY: make clumped random effect, to try to get convergence:
+        # images_in_used_comps = self.df_used_comp_obs['FITSfile'].drop_duplicates()
+        # self.df_used_comp_obs['ImageGroup'] = [1 if ff in list(images_in_used_comps[:3]) else 2
+        #                                        for ff in self.df_used_comp_obs['FITSfile']]
+        # random_effect_var_name = 'ImageGroup'
+
+        # Execute regression:
+        import warnings
+        from statsmodels.tools.sm_exceptions import ConvergenceWarning
+        warnings.simplefilter('ignore', ConvergenceWarning)
+        self.mm_fit = MixedModelFit(data=self.df_used_comp_obs,
+                                    dep_var=self.dep_var_name,
+                                    fixed_vars=fixed_effect_var_list,
+                                    group_var=random_effect_var_name)
+        n_comps_used = len(self.df_used_comp_obs['CompID'].drop_duplicates())
+        print(self.mm_fit.statsmodels_object.summary())
+        print('comps =', str(n_comps_used), ' used.')
+        print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
+        if not self.mm_fit.converged:
+            msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
+            print(msg)
+            fit_summary_lines.append(msg)
+        common.write_text_file(self.this_directory, 'fit_summary.txt',
+                               'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
+                               '\n'.join(fit_summary_lines) + '\n\n' +
+                               self.mm_fit.statsmodels_object.summary().as_text() +
+                               '\ncomps = ' + str(n_comps_used) + ' used' +
+                               '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     def _calc_mp_mags(self):
@@ -307,12 +408,13 @@ def _get_color_context():
     return this_directory, mp_string, an_string
 
 
-def _write_color_ini_stub(this_directory, filenames_temporal_order):
+def _write_color_ini_stub(this_directory, filenames_temporal_order, mean_datetime):
     """ Write color subdir's initial control (.ini) file, later to be edited by user.
         Called only by (at the end of) .assess().  DO NOT overwrite if color.ini already exists.
     :param this_directory:
     :param filenames_temporal_order: FITS filenames (all used filters) in ascending time order.
                [list of strings]
+    :param mean_datetime: averate datetime of exposures. [py datetime object]
     :return: [None]
     """
     # Do not overwrite existing session ini file:
@@ -324,6 +426,30 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order):
 
     filename_earliest = filenames_temporal_order[0]
     filename_latest = filenames_temporal_order[-1]
+    year_an = mean_datetime.year
+    site_dict = ini.make_site_dict(defaults_dict)
+    coldest_date = site_dict['coldest date'].split('-')
+    coldest_datetime = datetime(year_an, int(coldest_date[0]),
+                                int(coldest_date[1])).replace(tzinfo=timezone.utc)
+    season_phase = (mean_datetime - coldest_datetime).total_seconds() / (365.25 * 24 * 3600)
+    color_def_dict = ini.make_color_def_dict(defaults_dict)
+    extinction_lines = []
+    for f in color_def_dict['filters']:
+        extinctions = site_dict['extinctions'][f]
+        mean_ext = (extinctions[0] + extinctions[1]) / 2.0
+        half_amplitude = (extinctions[0] - extinctions[1]) / 2.0
+        extinction_an = mean_ext - half_amplitude * cos(2.0 * pi * season_phase)
+        extinction_lines.append((' '.ljust(15) + f.ljust(8) + ' ' + '{:6.4f}'.format(extinction_an)))
+    extinction_lines[0] = 'Extinctions ='.ljust(15) + extinction_lines[0][15:]
+    inst_dict = ini.make_instrument_dict(defaults_dict)
+    transform_lines = []
+    for f in color_def_dict['filters']:
+        f_def = color_def_dict['filters'][f]
+        transform_key = (f, f_def['target passband'], f_def['transform ci'][0], f_def['transform ci'][1])
+        transform = inst_dict['transforms'][transform_key][0]
+        transform_lines.append((' '.ljust(15) + f.ljust(8) + str(transform)))
+    transform_lines[0] = 'Transforms ='.ljust(15) + transform_lines[0][15:]
+
     header_lines = [
         '# This is ' + fullpath + '.',
         '']
@@ -356,9 +482,12 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order):
         '']
     regression_lines = [
         '[Regression]',
-        '# Extinctions from Site .ini file.',
-        '# Transforms from Instrument .ini file',
-        'Fit Vignette = Yes']
+        '# Extinctions from Site file \'' + defaults_dict['site ini'] + '\', adjusted for observing night.',
+        '# Overwrite if needed (rare).'] + \
+        extinction_lines + \
+        ['# Transforms from Instrument file \'' + defaults_dict['instrument ini'] + '\'.'] +\
+        transform_lines + \
+        ['Fit Vignette = Yes']
     raw_lines = header_lines + ini_lines + color_definition_lines +\
         mp_location_lines + selection_criteria_lines + regression_lines
     ready_lines = [line + '\n' for line in raw_lines]
