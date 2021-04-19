@@ -19,12 +19,8 @@ import mp2021.common as common
 #     add_obsairmass_df_mp_obs, add_gr_color_df_comps, add_ri_color_df_comps, write_df_images_csv, \
 #     write_df_comps_csv, write_df_comp_obs_csv, write_df_mp_obs_csv, make_df_masters
 
-
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
-
-TRANSFORM_COLUMN_LOOKUP = {('SG', 'SR'): 'gr_color', ('SR', 'SI'): 'ri_color'}
-CATMAG_PASSBAND_COLUMN_LOOKUP = {'SG': 'g', 'SR': 'r', 'SI': 'i'}
 
 
 class ColorIniFileError(Exception):
@@ -282,7 +278,7 @@ class ColorModel_1:
         self.df_used_comp_obs['CatMag'] = 0.0
         for f in filters_to_include:
             catmag_passband = self.color_def_dict['filters'][f]['target passband']
-            catmag_passband_column_name = CATMAG_PASSBAND_COLUMN_LOOKUP[catmag_passband]
+            catmag_passband_column_name = common.CATMAG_PASSBAND_COLUMN_LOOKUP[catmag_passband]
             is_in_filter = list(self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'CatMag'] = \
                 self.df_used_comp_obs.loc[is_in_filter, catmag_passband_column_name]
@@ -294,7 +290,7 @@ class ColorModel_1:
         for f in filters_to_include:
             transform_value = self.color_dict['transforms'][f]
             transform_ci =  self.color_def_dict['filters'][f]['transform ci']
-            transform_ci_column_name = TRANSFORM_COLUMN_LOOKUP[transform_ci]
+            transform_ci_column_name = common.TRANSFORM_COLUMN_LOOKUP[transform_ci]
             is_in_filter = (self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'TransformValue'] = transform_value
             self.df_used_comp_obs.loc[is_in_filter, 'TransformColor'] = \

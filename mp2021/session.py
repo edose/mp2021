@@ -97,7 +97,7 @@ def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
         log_file.write(mp_directory + '\n')
         log_file.write('MP: ' + mp_string + '\n')
         log_file.write('AN: ' + an_string + '\n')
-        log_file.write('FILTER:' + filter + '\n')
+        log_file.write('FILTER: ' + filter + '\n')
         log_file.write('This log started: ' +
                        '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n\n')
     print('Log file started.')
@@ -226,6 +226,7 @@ def make_dfs(print_ap_details=False):
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
     common.add_obsairmass_df_comp_obs(df_comp_obs, site_dict, df_comps, df_images)
     common.add_obsairmass_df_mp_obs(df_mp_obs, site_dict, df_images)
+    common.add_gr_color_df_comps(df_comps)
     common.add_ri_color_df_comps(df_comps)
 
     # Write dataframes to CSV files:
@@ -274,6 +275,69 @@ def do_session():
     _write_canopus_file(mp_string, an_string, this_directory, model)
     _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model)
     _make_session_diagnostic_plots(model, df_model)
+
+
+def do_transform(filter='V', target_passband='SG', color_index=('SG', 'SR'), order=1):
+    """ Get transform, from images in filter, to Sloan passband, against Sloan color index.
+        Minimal version of do_session, dedicated to the purpose, using comps only. No MP functions.
+    :param filter: name of filter. [string]
+    :param target_passband: name of target passband, from 'SG', 'SR', or 'SI'. [string]
+    :param color_index: two passbands defining transform color index, from ('SG', 'SR') or ('SR', 'SI').
+        [2-tuple of strings]
+    :param order: transform order, either 1 or 2 (1 is linear and the usual, 2 is quadratic). [int]
+    :return: [None]
+    """
+    context, defaults_dict, session_dict, log_file = _session_setup('do_session')
+    this_directory, mp_string, an_string, filter_string = context
+    mp_int = int(mp_string)  # put this in try/catch block.
+    mp_string = str(mp_int)
+    site_dict = ini.make_site_dict(defaults_dict)
+    df_comp_master, df_mp_master = common.make_df_masters(this_directory, defaults_dict,
+                                                          filters_to_include=filter,
+                                                          require_mp_obs_each_image=True,
+                                                          data_error_exception_type=SessionDataError)
+    df_model_raw = common.make_df_model_raw(df_comp_master)  # comps only.
+    df_model = common.mark_user_selections(df_model_raw, session_dict)
+    df_used_comps_obs = df_model.copy().loc[df_model['UseInModel'], :]
+    fixed_effect_var_list = []
+    if session_dict['fit vignette']:
+        fixed_effect_var_list.append('Vignette')
+
+    # Set catmag offset to dep var:
+    target_passband_column_name = common.CATMAG_PASSBAND_COLUMN_LOOKUP[target_passband]
+    catmag_offset = df_used_comps_obs[target_passband_column_name].astype(float)
+
+    # Set transform (color index) indep var(s):
+    color_index_column_name = common.TRANSFORM_COLUMN_LOOKUP[color_index]
+    df_used_comps_obs['CI'] = df_used_comps_obs[color_index_column_name]
+    fixed_effect_var_list.append('CI')
+    if order == 2:
+        df_used_comps_obs['CI2'] = [ci ** 2 for ci in df_used_comps_obs['CI']]
+        fixed_effect_var_list.append('CI2')
+
+    # Set extinction*airmass offset to dep var:
+    extinction = float(session_dict['fit extinction'][1])
+    extinction_offset = (extinction * df_used_comps_obs['ObsAirmass']).astype(float)
+
+    random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
+    dep_var_name = 'InstMag_with_offsets'
+    dep_var_offset = catmag_offset + extinction_offset
+    df_used_comps_obs[dep_var_name] = df_used_comps_obs['InstMag'] - dep_var_offset
+
+    import warnings
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning
+    warnings.simplefilter('ignore', ConvergenceWarning)
+    mm_fit = MixedModelFit(data=df_used_comps_obs,
+                           dep_var=dep_var_name,
+                           fixed_vars=fixed_effect_var_list,
+                           group_var=random_effect_var_name)
+    n_comps_used = len(df_used_comps_obs['CompID'].drop_duplicates())
+    print(mm_fit.statsmodels_object.summary())
+    print('comps =', str(n_comps_used), ' used.')
+    print('sigma =', '{0:.1f}'.format(1000.0 * mm_fit.sigma), 'mMag.')
+    if not mm_fit.converged:
+        msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
+        print(msg)
 
 
 _____SUPPORT_for_make_dfs_____________________________________________ = 0
@@ -331,10 +395,10 @@ class SessionModel:
         self.df_used_comps_obs['CI'] = self.df_used_comps_obs['ri_color']
         self.df_used_comps_obs['CI2'] = [ci ** 2 for ci in self.df_used_comps_obs['CI']]
         transform_option = self.session_dict['fit transform']
-        if transform_option == ('fit', '1'):
+        if transform_option == ('fit=1',):
             fixed_effect_var_list.append('CI')
             msg = ' Transform first-order fit to Color Index.'
-        elif transform_option == ('fit', '2'):
+        elif transform_option == ('fit=2',):
             fixed_effect_var_list.extend(['CI', 'CI2'])
             msg = ' Transform second-order fit to Color Index.'
         elif transform_option[0] == 'use':

@@ -692,3 +692,7 @@ def mark_user_selections(df_model, session_dict):
     df_model = df_model.copy(deep=True)  # to shut up pandas and its fake warnings.
     df_model.loc[:, 'UseInModel'] = ~ obs_to_deselect
     return df_model
+
+
+TRANSFORM_COLUMN_LOOKUP = {('SG', 'SR'): 'gr_color', ('SR', 'SI'): 'ri_color'}
+CATMAG_PASSBAND_COLUMN_LOOKUP = {'SG': 'g', 'SR': 'r', 'SI': 'i'}
