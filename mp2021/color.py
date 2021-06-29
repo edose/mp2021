@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from math import pi, cos
 
 # External packages:
+import pandas as pd
 
 # Author's packages:
 import astropak.util
@@ -117,7 +118,7 @@ def assess(return_results=False):
      Then, perform checks on FITS files in this directory before performing color photometry proper.
      Modeled after and extended from assess() found in variable-star photometry package 'photrix'.
     :return: [None], or dict of summary info and warnings. [py dict]
-"""
+    """
     try:
         context = _get_color_context()
     except ColorLogFileError as e:
@@ -150,7 +151,7 @@ def assess(return_results=False):
 
 
 def make_dfs(print_ap_details=False):
-    """ Perform aperture photometry for one subdirectory of color photometry.
+    """ Perform aperture photometry for one subdirectory of color photometry. Makes 4 dataframes.
         :param print_ap_details: True if user wants aperture details for each MP. [boolean]
         """
     context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('make_dfs')
@@ -182,16 +183,17 @@ def make_dfs(print_ap_details=False):
 
     # Make comp-star apertures, comps dataframe, and comp obs dataframe:
     df_comps = common.make_df_comps(refcat2)
-    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
+    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap,
+                                                     background_width)
     df_comp_obs = common.make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
 
     # Make MP apertures and MP obs dataframe:
     starting_mp_obs_id = max(df_comp_obs['ObsID'].astype(int)) + 1
-    mp_apertures_dict, mp_mid_radec_dict =common.make_mp_apertures(fits_object_dict, mp_string,
-                                                                   color_dict, disc_radius, gap,
-                                                                   background_width, log_file,
-                                                                   starting_obs_id=starting_mp_obs_id,
-                                                                   print_ap_details=print_ap_details)
+    mp_apertures_dict, mp_mid_radec_dict = common.make_mp_apertures(fits_object_dict, mp_string,
+                                                                    color_dict, disc_radius, gap,
+                                                                    background_width, log_file,
+                                                                    starting_obs_id=starting_mp_obs_id,
+                                                                    print_ap_details=print_ap_details)
     df_mp_obs = common.make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
 
     # WANTED??: _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)
@@ -209,18 +211,21 @@ def make_dfs(print_ap_details=False):
     log_file.close()
     print('\nNext: (1) ' + defaults_dict['color control filename'] +
           ': enter comp selection limits and regression model options.',
-          '\n      (2) run do_color()\n')
+          '\n      (2) run do_color_stepwise()\n')
 
 
 def do_color():
     """ Primary color photometry for one color subdirectory.
     Takes the 4 CSV files from make_dfs().
+    Gets MP colors in two steps:
+        1. color_model_1: get (untransformed) MP mags for all passbands.
+        2. color_model_2: get MP colors using simple regression on MP mags.
     Generates diagnostic plots for iterative regression refinement.
     Typically iterated, pruning comp-star ranges and outliers, until converged and then simply stop.
     :returns None. Writes all info to files.
     USAGE: do_color()   [no return value]
     """
-    context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('make_dfs')
+    context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('do_color_stepwise')
     this_directory, mp_string, an_string = context
     filters_to_include = list(color_def_dict['filters'].keys())
     # instrument_dict = ini.make_instrument_dict(defaults_dict)
@@ -234,19 +239,20 @@ def do_color():
                                                           data_error_exception_type=ColorDataError)
     df_model_raw = common.make_df_model_raw(df_comp_master)  # comps-only data from all used filters.
     df_model = common.mark_user_selections(df_model_raw, color_dict)
-    model = ColorModel_1(df_model, color_dict, color_def_dict, df_mp_master, this_directory)
-
-
-
-
+    color_model_1 = ColorModel_1(df_model, color_dict, color_def_dict, df_mp_master, this_directory)
+    color_model_2 = ColorModel_2(color_model_1)
 
 
 __________SUPPORT_for_do_color____________________________________________ = 0
 
 
+# TODO: (1) alter ColorModel_1 to use approximate zero-point offsets, allow random vars to take up residual.
+# TODO: (2) decide whether ColorModel_2 should fit to (untransf) MP mags, or to MP InstMags.
 class ColorModel_1:
     """ Generates and holds mixed-model regression model suitable to MP color index determination.
-        Affords prediction for MP magnitudes. """
+        Makes estimates ("predictions") for partial MP magnitudes (partial, because still need to be
+           adjusted for MP color index, which we don't know until we've run ColorModel_2.
+    """
     def __init__(self, df_model, color_dict, color_def_dict, df_mp_master, this_directory):
         self.df_model = df_model
         self.color_dict = color_dict
@@ -289,7 +295,7 @@ class ColorModel_1:
         self.df_used_comp_obs['TransformColor'] = None
         for f in filters_to_include:
             transform_value = self.color_dict['transforms'][f]
-            transform_ci =  self.color_def_dict['filters'][f]['transform ci']
+            transform_ci = self.color_def_dict['filters'][f]['transform ci']
             transform_ci_column_name = common.TRANSFORM_COLUMN_LOOKUP[transform_ci]
             is_in_filter = (self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'TransformValue'] = transform_value
@@ -305,27 +311,44 @@ class ColorModel_1:
             is_in_filter = (self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'ExtinctionValue'] = extinction_value
         extinction_offset = (self.df_used_comp_obs['ExtinctionValue'] *
-                             self.df_used_comp_obs['Airmass']).astype(float)
+                             self.df_used_comp_obs['ObsAirmass']).astype(float)
+
+        # Prepare offsets with all components except zero-point offsets (which are not known yet):
+        partial_offset = catmag_offset + transform_offset + extinction_offset
+        instmag_partially_offset = self.df_used_comp_obs['InstMag'] - partial_offset
+
+        # Prepare *approximate* per-filter Zero-point (from main filter) offset to dep var:
+        # Get mean offsets for each filter:
+        mean_inst_mags = {}
+        for f in filters_to_include:
+            is_in_filter = (self.df_used_comp_obs['Filter'] == f)
+            mean_inst_mags[f] = instmag_partially_offset[is_in_filter].mean()
+        ref_filter = self.color_def_dict['reference filter']
+        self.df_used_comp_obs['ZeroPointOffset'] = None
+        for f in filters_to_include:
+            instmag_fully_offset = mean_inst_mags[f] - mean_inst_mags[ref_filter]
+            is_in_filter = (self.df_used_comp_obs['Filter'] == f)
+            self.df_used_comp_obs.loc[is_in_filter, 'ZeroPointOffset'] = instmag_fully_offset
+        zeropoint_offset = self.df_used_comp_obs['ZeroPointOffset'].astype(float)
+        total_offset = partial_offset + zeropoint_offset
+        self.df_used_comp_obs[self.dep_var_name] = (self.df_used_comp_obs['InstMag'] -
+                                                    total_offset).astype(float)
 
         # Build fixed effect variables and values:
-        fixed_effect_var_list = ['Vignette']  # mandatory fixed-effect (independent) variable.
-        for f in filters_to_include[1:]:
-            is_in_filter = (self.df_used_comp_obs['Filter'] == f)
-            column_name = 'dZ_' + f
-            self.df_used_comp_obs[column_name] = 0.0
-            self.df_used_comp_obs.loc[is_in_filter, column_name] = 1.0
-            fixed_effect_var_list.append(column_name)
+        fixed_effect_var_list = []
+        fixed_effect_var_list.append('Vignette')  # mandatory fixed-effect (independent) variable.
+
+        # for f in filters_to_include[1:]:
+        #     is_in_filter = (self.df_used_comp_obs['Filter'] == f)
+        #     column_name = 'dZ_' + f
+        #     self.df_used_comp_obs[column_name] = 0.0
+        #     self.df_used_comp_obs.loc[is_in_filter, column_name] = 1.0
+        #     fixed_effect_var_list.append(column_name)
 
         # Complete regression preparations:
         random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
-        dep_var_offset = catmag_offset + transform_offset + extinction_offset
-        self.df_used_comp_obs[self.dep_var_name] = self.df_used_comp_obs['InstMag'] - dep_var_offset
-
-        # # TEMPORARY: make clumped random effect, to try to get convergence:
-        # images_in_used_comps = self.df_used_comp_obs['FITSfile'].drop_duplicates()
-        # self.df_used_comp_obs['ImageGroup'] = [1 if ff in list(images_in_used_comps[:3]) else 2
-        #                                        for ff in self.df_used_comp_obs['FITSfile']]
-        # random_effect_var_name = 'ImageGroup'
+        # dep_var_offset = catmag_offset + transform_offset + extinction_offset + zeropoint_offset
+        # self.df_used_comp_obs[self.dep_var_name] = self.df_used_comp_obs['InstMag'] - dep_var_offset
 
         # Execute regression:
         import warnings
@@ -350,24 +373,70 @@ class ColorModel_1:
                                '\ncomps = ' + str(n_comps_used) + ' used' +
                                '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
-        return 1111
+        bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
+        self.df_used_mp_obs = self.df_used_mp_obs.copy(deep=True)  # to shut up pandas & its fake warnings.
+        self.df_used_mp_obs['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
+        bogus_mp_ri_color = 0.0  # we'll need this below, to correct raw predictions.
+
+        # Add required columns to df, make raw predictions:
+        filter_fixed_effects = [fe for fe in self.mm_fit.fixed_vars if fe.startswith('dZ_')]
+        for ffe in filter_fixed_effects:
+            filter_name = ffe[3:]
+            self.df_used_mp_obs[ffe] = [1 if f == filter_name else 0
+                                        for f in self.df_used_mp_obs['Filter']]
+        raw_predictions = self.mm_fit.predict(self.df_used_mp_obs, include_random_effect=True)
+
+        instrument_mag_offset = self.df_used_mp_obs['InstMag'] * -1.0
+
+        # Make extinction * Airmass offset:
+        filters = self.df_used_mp_obs['Filter'].drop_duplicates()
+        for f in filters:
+            extinction_value = self.color_dict['extinctions'][f]
+            is_in_filter = (self.df_used_mp_obs['Filter'] == f)
+            self.df_used_mp_obs.loc[is_in_filter, 'ExtinctionValue'] = extinction_value
+        extinction_offset = (self.df_used_mp_obs['ExtinctionValue'] *
+                             self.df_used_mp_obs['ObsAirmass']).astype(float)
+
+        # Return value is pandas series: best_mp_mag + transform*color_index.
+        adjusted_mp_mags = -1.0 * (raw_predictions + instrument_mag_offset + extinction_offset)
+        df_mp_mags = pd.DataFrame(data={'Adj_MP_Mags': adjusted_mp_mags},
+                                  index=list(adjusted_mp_mags.index))
+        df_mp_mags = pd.merge(left=df_mp_mags,
+                              right=self.df_used_mp_obs.loc[:, ['JD_mid', 'JD_fract', 'FITSfile',
+                                                                'InstMag', 'InstMagSigma', 'Filter']],
+                              how='left', left_index=True, right_index=True, sort=False)
+        return df_mp_mags
+
+
+class ColorModel_2:
+    """ Accepts adjusted MP magnitudes from ColorModel_1 and related data, effectives solves simultaneous
+        equations to yield MP colors and other less-important results."""
+    def __init__(self, color_model_1):
+        """ Organize data, perform second regression, store MP colors & a bit of other data.
+        :param color_model_1:
+        :return: [None] See object attribute variables for results.
+        """
+        context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('ColorModel_2')
+        df = color_model_1.df_mp_mags
+        dep_var_name = 'Adj_MP_Mags'
+        random_effect_name = 'FITSfile'
+
+        # Make time columns:
+        df['DT'] = df['JD_fract'] - df['JD_fract'].mean()
+        df['DT2'] = df['DT'] ** 2
+
+        # Make TransformValue column:
+        df['TransformValue'] = None
+        filters_to_include = df['Filter'].drop_duplicates()
+        for f in filters_to_include:
+            transform_value = color_dict['transforms'][f]
+            is_in_filter = list(df['Filter'] == f)
+            df.loc[is_in_filter, 'TransformValue'] = transform_value
+
+        # Make ColorIndexFactor columns:
+        reference_passband = color_def_dict['Reference']['Passband']
 
 
 __________SUPPORT_FUNCTIONS_and_CLASSES = 0
@@ -437,6 +506,7 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order, mean_datetim
         extinction_an = mean_ext - half_amplitude * cos(2.0 * pi * season_phase)
         extinction_lines.append((' '.ljust(15) + f.ljust(8) + ' ' + '{:6.4f}'.format(extinction_an)))
     extinction_lines[0] = 'Extinctions ='.ljust(15) + extinction_lines[0][15:]
+
     inst_dict = ini.make_instrument_dict(defaults_dict)
     transform_lines = []
     for f in color_def_dict['filters']:
@@ -478,10 +548,11 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order, mean_datetim
         '']
     regression_lines = [
         '[Regression]',
-        '# Extinctions from Site file \'' + defaults_dict['site ini'] + '\', adjusted for observing night.',
+        '# Extinctions adapted from Site file \'' + defaults_dict['site ini'] +
+        '\', adjusted for observing night.',
         '# Overwrite if needed (rare).'] + \
         extinction_lines + \
-        ['# Transforms from Instrument file \'' + defaults_dict['instrument ini'] + '\'.'] +\
+        ['# Transforms copied from Instrument file \'' + defaults_dict['instrument ini'] + '\'.'] +\
         transform_lines + \
         ['Fit Vignette = Yes']
     raw_lines = header_lines + ini_lines + color_definition_lines +\
@@ -508,5 +579,3 @@ def _color_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     log_file.write('\n===== ' + calling_function_name + '()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     return context, defaults_dict, color_dict, color_def_dict, log_file
-
-

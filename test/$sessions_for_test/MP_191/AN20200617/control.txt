@@ -15,8 +15,8 @@
 #MP_LOCATION  MP_191-0028-Clear.fts  1144.3  1099.3
 ;
 ;===== MP RI COLOR BLOCK =================================================
-;===== Enter before do_mp_phot(), get from do_color. =====================
-#MP_RI_COLOR +0.220 ;  get by running do_color(), or leave as default=+0.220
+;===== Enter before do_mp_phot(), get from do_color_stepwise. =====================
+#MP_RI_COLOR +0.220 ;  get by running do_color_stepwise(), or leave as default=+0.220
 ;
 ;===== SELECTION CRITERIA BLOCK ==========================================
 ;===== Enter before do_mp_phot() =========================================

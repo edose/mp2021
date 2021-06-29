@@ -286,9 +286,13 @@ def make_color_def_dict(defaults_dict):
     ini_config = configparser.ConfigParser()
     ini_config.read(color_def_fullpath)
     color_def_dict = OrderedDict()
+
     target_color_strings = ini_config.get('Targets', 'Target Colors').split('\n')
     color_def_dict['target_colors'] = [tuple(i.strip() for i in s.split('-'))
                                        for s in target_color_strings]
+    color_def_dict['reference filter'] = ini_config.get('Reference', 'Filter')
+    color_def_dict['reference passband'] = ini_config.get('Reference', 'Passband')
+
     filter_sections = [fs for fs in ini_config.sections() if fs.lower().startswith('filter')]
     filters = [fs[6:].strip() for fs in filter_sections]
     filters_dict = OrderedDict()
@@ -297,6 +301,27 @@ def make_color_def_dict(defaults_dict):
                            'target passband': ini_config.get(fs, 'Target Passband'),
                            'transform ci': tuple(ini_config.get(fs, 'Transform CI').split('-'))}
     color_def_dict['filters'] = filters_dict
+
+    # Verify: reference filter and passband match in exactly one Filter section.
+    n_filter_matches = sum([1 if f == color_def_dict['reference filter'] else 0 for f in filters_dict])
+    if n_filter_matches != 1:
+        raise ColorDefinitionError('Reference filter ' + color_def_dict['reference filter'] +
+                                   ' must be present in exactly one Filter section, but is in ' +
+                                   str(n_filter_matches))
+    n_passband_matches = sum([1 if filters_dict[f]['target passband'] ==
+                                   color_def_dict['reference passband']
+                              else 0 for f in filters_dict])
+    if n_passband_matches != 1:
+        raise ColorDefinitionError('Reference passband ' + color_def_dict['reference passband'] +
+                                   ' must be present in exactly one Filter section, but is in ' +
+                                   str(n_passband_matches))
+
+    # Verify: target colors eactly equals *set of* Transform CI colors.
+    target_color_set = set(color_def_dict['target_colors'])
+    transform_ci_set = set([filters_dict[f]['transform ci'] for f in filters_dict])
+    if target_color_set != transform_ci_set:
+        raise ColorDefinitionError('Target Colors must equal set of transform CI colors, but do not.')
+
     return color_def_dict
 
 

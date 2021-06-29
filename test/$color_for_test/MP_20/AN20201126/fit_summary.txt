@@ -1,22 +1,22 @@
 Regression (mp2021) for: C:\Dev\mp2021\test\$color_for_test\MP_20\AN20201126
 
-
+ >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.
 
               Mixed Linear Model Regression Results
 ==================================================================
 Model:            MixedLM Dependent Variable: InstMag_with_offsets
 No. Observations: 468     Method:             REML                
 No. Groups:       6       Scale:              0.0110              
-Min. group size:  78      Log-Likelihood:     376.7105            
-Max. group size:  78      Converged:          Yes                 
+Min. group size:  78      Log-Likelihood:     376.9628            
+Max. group size:  78      Converged:          No                  
 Mean group size:  78.0                                            
 -------------------------------------------------------------------
                Coef.   Std.Err.      z      P>|z|   [0.025   0.975]
 -------------------------------------------------------------------
-Intercept     -20.719     0.011  -1829.546  0.000  -20.741  -20.696
-Vignette        0.001     0.007      0.205  0.838   -0.012    0.015
-dZ_R           -0.094     0.012     -7.586  0.000   -0.118   -0.070
-dZ_I            1.171     0.012     94.505  0.000    1.147    1.195
+Intercept     -20.718     0.011  -1830.522  0.000  -20.741  -20.696
+Vignette        0.001     0.007      0.167  0.868   -0.013    0.015
+dZ_R           -0.094     0.012     -7.588  0.000   -0.118   -0.070
+dZ_I            1.171     0.012     94.574  0.000    1.147    1.196
 Group Var       0.000     0.001                                    
 ==================================================================
 
