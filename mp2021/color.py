@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from math import pi, cos
 
 # External packages:
+import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 
 # Author's packages:
 import astropak.util
@@ -240,7 +242,7 @@ def do_color():
     df_model_raw = common.make_df_model_raw(df_comp_master)  # comps-only data from all used filters.
     df_model = common.mark_user_selections(df_model_raw, color_dict)
     color_model_1 = ColorModel_1(df_model, color_dict, color_def_dict, df_mp_master, this_directory)
-    color_model_2 = ColorModel_2(color_model_1)
+    color_model_2 = ColorModel_2(color_model_1.df_untransformed_mp_mags)
 
 
 __________SUPPORT_for_do_color____________________________________________ = 0
@@ -268,7 +270,9 @@ class ColorModel_1:
         self.vignette = None    # placeholder for this fit parameter results [a scalar].
 
         self._prep_and_do_regression()
-        self.df_mp_mags = self._calc_mp_mags()
+        # self._modify_df_usef_mp_obs_for_test_only()
+        self.df_untransformed_mp_mags = self._calc_mp_mags()
+        self.return_text = ''
 
     def _prep_and_do_regression(self):
         """ Using MixedModelFit class (which wraps statsmodels.MixedLM.from_formula()).
@@ -288,11 +292,12 @@ class ColorModel_1:
             is_in_filter = list(self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'CatMag'] = \
                 self.df_used_comp_obs.loc[is_in_filter, catmag_passband_column_name]
-        catmag_offset = self.df_used_comp_obs['CatMag'].astype(float)
+        catmag_offset = self.df_used_comp_obs['CatMag']
 
         # Prepare transform*color offset to dep var, from instrument ini file:
-        self.df_used_comp_obs['TransformValue'] = None
-        self.df_used_comp_obs['TransformColor'] = None
+        self.df_used_comp_obs['TransformValue'] = np.NAN  # do not use None--that results in object type.
+        self.df_used_comp_obs['TransformColor'] = np.NAN
+        self.df_used_mp_obs['TransformValue'] = np.NAN
         for f in filters_to_include:
             transform_value = self.color_dict['transforms'][f]
             transform_ci = self.color_def_dict['filters'][f]['transform ci']
@@ -301,17 +306,22 @@ class ColorModel_1:
             self.df_used_comp_obs.loc[is_in_filter, 'TransformValue'] = transform_value
             self.df_used_comp_obs.loc[is_in_filter, 'TransformColor'] = \
                 self.df_used_comp_obs.loc[is_in_filter, transform_ci_column_name]
+            is_in_filter = (self.df_used_mp_obs['Filter'] == f)
+            self.df_used_mp_obs.loc[is_in_filter, 'TransformValue'] = transform_value
         transform_offset = (self.df_used_comp_obs['TransformValue'] *
-                            self.df_used_comp_obs['TransformColor']).astype(float)
+                            self.df_used_comp_obs['TransformColor'])
 
         # Prepare extinction*airmass offset to dep var, from site ini file:
-        self.df_used_comp_obs['ExtinctionValue'] = None
+        self.df_used_comp_obs['ExtinctionValue'] = np.NAN
+        self.df_used_mp_obs['ExtinctionValue'] = np.NAN
         for f in filters_to_include:
             extinction_value = self.color_dict['extinctions'][f]
             is_in_filter = (self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'ExtinctionValue'] = extinction_value
+            is_in_filter = (self.df_used_mp_obs['Filter'] == f)
+            self.df_used_mp_obs.loc[is_in_filter, 'ExtinctionValue'] = extinction_value
         extinction_offset = (self.df_used_comp_obs['ExtinctionValue'] *
-                             self.df_used_comp_obs['ObsAirmass']).astype(float)
+                             self.df_used_comp_obs['ObsAirmass'])
 
         # Prepare offsets with all components except zero-point offsets (which are not known yet):
         partial_offset = catmag_offset + transform_offset + extinction_offset
@@ -324,31 +334,22 @@ class ColorModel_1:
             is_in_filter = (self.df_used_comp_obs['Filter'] == f)
             mean_inst_mags[f] = instmag_partially_offset[is_in_filter].mean()
         ref_filter = self.color_def_dict['reference filter']
-        self.df_used_comp_obs['ZeroPointOffset'] = None
+        self.df_used_comp_obs['ZeroPointOffset'] = np.NAN
+        self.df_used_mp_obs['ZeroPointOffset'] = np.NAN
         for f in filters_to_include:
             instmag_fully_offset = mean_inst_mags[f] - mean_inst_mags[ref_filter]
             is_in_filter = (self.df_used_comp_obs['Filter'] == f)
             self.df_used_comp_obs.loc[is_in_filter, 'ZeroPointOffset'] = instmag_fully_offset
-        zeropoint_offset = self.df_used_comp_obs['ZeroPointOffset'].astype(float)
+            is_in_filter = (self.df_used_mp_obs['Filter'] == f)
+            self.df_used_mp_obs.loc[is_in_filter, 'ZeroPointOffset'] = instmag_fully_offset
+        zeropoint_offset = self.df_used_comp_obs['ZeroPointOffset']
         total_offset = partial_offset + zeropoint_offset
-        self.df_used_comp_obs[self.dep_var_name] = (self.df_used_comp_obs['InstMag'] -
-                                                    total_offset).astype(float)
+        self.df_used_comp_obs[self.dep_var_name] = (self.df_used_comp_obs['InstMag'] - total_offset)
 
-        # Build fixed effect variables and values:
+        # Build fixed effect variables and values, and random effect variable:
         fixed_effect_var_list = []
         fixed_effect_var_list.append('Vignette')  # mandatory fixed-effect (independent) variable.
-
-        # for f in filters_to_include[1:]:
-        #     is_in_filter = (self.df_used_comp_obs['Filter'] == f)
-        #     column_name = 'dZ_' + f
-        #     self.df_used_comp_obs[column_name] = 0.0
-        #     self.df_used_comp_obs.loc[is_in_filter, column_name] = 1.0
-        #     fixed_effect_var_list.append(column_name)
-
-        # Complete regression preparations:
         random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
-        # dep_var_offset = catmag_offset + transform_offset + extinction_offset + zeropoint_offset
-        # self.df_used_comp_obs[self.dep_var_name] = self.df_used_comp_obs['InstMag'] - dep_var_offset
 
         # Execute regression:
         import warnings
@@ -366,77 +367,165 @@ class ColorModel_1:
             msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
             print(msg)
             fit_summary_lines.append(msg)
-        common.write_text_file(self.this_directory, 'fit_summary.txt',
-                               'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
-                               '\n'.join(fit_summary_lines) + '\n\n' +
-                               self.mm_fit.statsmodels_object.summary().as_text() +
-                               '\ncomps = ' + str(n_comps_used) + ' used' +
-                               '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
+        self.return_text = 'Regression (mp2021) for: ' + self.this_directory + '\n\n' +\
+            '\n'.join(fit_summary_lines) + '\n\n' +\
+            self.mm_fit.statsmodels_object.summary().as_text() +\
+            '\ncomps = ' + str(n_comps_used) + ' used' +\
+            '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.'
+        common.write_text_file(self.this_directory, 'fit_summary.txt', self.return_text)
+
+
+    # def _modify_df_usef_mp_obs_for_test_only(self):
+    #     i_row = 5  # starting with first row, add modified rows just below it.
+    #
+    #     df_row = self.df_used_mp_obs.iloc[i_row:i_row + 1, :]
+    #     df_row.loc[:, 'Mod Comment'] = '[original]'
+    #     df_list = [df_row]
+    #     mods = [{'column': 'InstMag',  'change': 0.6},
+    #             {'column': 'Vignette', 'change': 1.0},
+    #             {'column': 'ObsAirmass', 'change': 0.7},
+    #             {'column': 'TransformValue', 'change': 0.1},
+    #             {'column': 'ExtinctionValue', 'change': 0.05},
+    #             {'column': 'ZeroPointOffset', 'change': 0.3}]
+    #     for mod in mods:
+    #         df_mod = df_row.copy()
+    #         mod_index = [df_row.index[0] + ' / ' + mod['column']]
+    #         df_mod.index = mod_index
+    #         df_mod[mod['column']] = df_mod[mod['column']] + mod['change']
+    #         df_mod['Mod Comment'] = 'Add ' + str(mod['change']) + ' to ' + mod['column']
+    #         df_list.append(df_mod)
+    #
+    #     self.df_used_mp_obs = pd.concat(df_list)
+    #     iiii = 4
 
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
-        bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
-        self.df_used_mp_obs = self.df_used_mp_obs.copy(deep=True)  # to shut up pandas & its fake warnings.
-        self.df_used_mp_obs['CatMag'] = bogus_cat_mag  # totally bogus local value, corrected for later.
-        bogus_mp_ri_color = 0.0  # we'll need this below, to correct raw predictions.
+        # self.df_used_mp_obs = self.df_used_mp_obs.copy(deep=True)  # to shut up pandas & its fake warnings.
+        self.df_used_mp_obs['CatMag'] = 0  # totally bogus local value.
 
-        # Add required columns to df, make raw predictions:
-        filter_fixed_effects = [fe for fe in self.mm_fit.fixed_vars if fe.startswith('dZ_')]
-        for ffe in filter_fixed_effects:
-            filter_name = ffe[3:]
-            self.df_used_mp_obs[ffe] = [1 if f == filter_name else 0
-                                        for f in self.df_used_mp_obs['Filter']]
         raw_predictions = self.mm_fit.predict(self.df_used_mp_obs, include_random_effect=True)
-
-        instrument_mag_offset = self.df_used_mp_obs['InstMag'] * -1.0
-
-        # Make extinction * Airmass offset:
-        filters = self.df_used_mp_obs['Filter'].drop_duplicates()
-        for f in filters:
-            extinction_value = self.color_dict['extinctions'][f]
-            is_in_filter = (self.df_used_mp_obs['Filter'] == f)
-            self.df_used_mp_obs.loc[is_in_filter, 'ExtinctionValue'] = extinction_value
+        instrument_mag_observed = self.df_used_mp_obs['InstMag']
         extinction_offset = (self.df_used_mp_obs['ExtinctionValue'] *
-                             self.df_used_mp_obs['ObsAirmass']).astype(float)
+                             self.df_used_mp_obs['ObsAirmass'])
+        zeropoint_offset = self.df_used_mp_obs['ZeroPointOffset']
+        untransformed_mp_best_mags = instrument_mag_observed \
+            - extinction_offset - zeropoint_offset - raw_predictions
 
         # Return value is pandas series: best_mp_mag + transform*color_index.
-        adjusted_mp_mags = -1.0 * (raw_predictions + instrument_mag_offset + extinction_offset)
-        df_mp_mags = pd.DataFrame(data={'Adj_MP_Mags': adjusted_mp_mags},
-                                  index=list(adjusted_mp_mags.index))
-        df_mp_mags = pd.merge(left=df_mp_mags,
-                              right=self.df_used_mp_obs.loc[:, ['JD_mid', 'JD_fract', 'FITSfile',
-                                                                'InstMag', 'InstMagSigma', 'Filter']],
-                              how='left', left_index=True, right_index=True, sort=False)
-        return df_mp_mags
+        df_untransformed_mp_mags = pd.DataFrame(data={'Untransformed_MP_Mags': untransformed_mp_best_mags},
+                                                index=list(untransformed_mp_best_mags.index))
+        df_untransformed_mp_mags = pd.merge(left=df_untransformed_mp_mags,
+                                            right=self.df_used_mp_obs.loc[:,
+                                                  ['JD_mid', 'JD_fract', 'FITSfile',
+                                                   'InstMag', 'InstMagSigma', 'Filter', 'TransformValue']],
+                                            how='left', left_index=True, right_index=True, sort=False)
+        return df_untransformed_mp_mags
 
 
 class ColorModel_2:
     """ Accepts adjusted MP magnitudes from ColorModel_1 and related data, effectives solves simultaneous
         equations to yield MP colors and other less-important results."""
-    def __init__(self, color_model_1):
+    def __init__(self, df_untransformed_mp_mags):
         """ Organize data, perform second regression, store MP colors & a bit of other data.
-        :param color_model_1:
+        :param df_untransformed_mp_mags:
         :return: [None] See object attribute variables for results.
         """
         context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('ColorModel_2')
-        df = color_model_1.df_mp_mags
-        dep_var_name = 'Adj_MP_Mags'
-        random_effect_name = 'FITSfile'
+        self.df_model = df_untransformed_mp_mags
+        self.color_def_dict = color_def_dict
+        self.return_text = ''
+        self._prep_and_do_regression(include_dt2=False)
+        self._prep_and_do_regression(include_dt2=True)
+        print(self.return_text + '\n')
+
+    def _prep_and_do_regression(self, include_dt2=True):
+        """ Using ordinary least squares regression to extract color values for MP.
+        :param include_dt2: True iff quadratic time parameter to be included, else False. [boolean]
+        :return: [None]
+        """
+        dep_var_name = 'Untransformed_MP_Mags'
+        indep_var_names = []
 
         # Make time columns:
-        df['DT'] = df['JD_fract'] - df['JD_fract'].mean()
-        df['DT2'] = df['DT'] ** 2
+        self.df_model['DT'] = self.df_model['JD_fract'] - self.df_model['JD_fract'].mean()
+        indep_var_names.append('DT')
+        if include_dt2:
+            self.df_model['DT2'] = (self.df_model['DT'] ** 2).astype(float)
+            indep_var_names.append('DT2')
 
-        # Make TransformValue column:
-        df['TransformValue'] = None
-        filters_to_include = df['Filter'].drop_duplicates()
+        # Make Color Index Factor column(s):
+        filters_to_include = self.df_model['Filter'].drop_duplicates()
+        reference_filter = self.color_def_dict['reference filter']
+        self.df_model['CI Factor'] = 0
+        color_column_names = []
         for f in filters_to_include:
-            transform_value = color_dict['transforms'][f]
-            is_in_filter = list(df['Filter'] == f)
-            df.loc[is_in_filter, 'TransformValue'] = transform_value
+            if f != reference_filter:
+                pb = self.color_def_dict['filters'][f]['target passband']
+                ci_pbs = self.color_def_dict['filters'][f]['transform ci']
+                if pb == ci_pbs[0]:
+                    ci_factor = 1
+                elif pb == ci_pbs[1]:
+                    ci_factor = -1
+                else:
+                    raise ini.ColorDefinitionError('Passband ' + pb + ' (from filter ' + f +
+                                                   'not valid for its transform ci ' + '-'.join(ci_pbs))
+                is_in_filter = list(self.df_model['Filter'] == f)
+                self.df_model.loc[is_in_filter, 'CI Factor'] = ci_factor
+                color_column_name = 'Color_' + '_'.join(ci_pbs)
+                self.df_model[color_column_name] = 0
+                self.df_model.loc[is_in_filter, color_column_name] = ci_factor
+                indep_var_names.append(color_column_name)
 
-        # Make ColorIndexFactor columns:
-        reference_passband = color_def_dict['Reference']['Passband']
+        # Make TransformOffsets, add to proper Color_ column:
+        for f in filters_to_include:
+            # pb = self.color_def_dict['filters'][f]['target passband']
+            ci_pbs = self.color_def_dict['filters'][f]['transform ci']
+            is_in_filter = list(self.df_model['Filter'] == f)
+            color_column_name = 'Color_' + '_'.join(ci_pbs)
+            self.df_model.loc[is_in_filter, color_column_name] -= \
+                self.df_model.loc[is_in_filter, 'TransformValue']  # NB: sign is negative.
+
+        # Arrange data and execute Ordinary Least Squares multiple regression:
+        df_y = self.df_model[dep_var_name].copy()
+        df_x = self.df_model[indep_var_names].copy()
+        df_x = sm.add_constant(df_x)
+        import warnings
+        from statsmodels.tools.sm_exceptions import ValueWarning
+        warnings.simplefilter('ignore', ValueWarning)
+        model = sm.OLS(df_y, df_x)
+        results = model.fit()
+        self.return_text = '\n\n' + results.summary()
+        self.return_text += '\nResidual = ' + '{0:0.1f}'.format(1000 * results.mse_resid**0.5) + ' mMag.'
+
+
+# def make_test_df_untransformed():
+#     catmag_SR = 14.1
+#     color_SG_SR = +0.225
+#     color_SR_SI = +0.207
+#     catmag_SG = catmag_SR + color_SG_SR
+#     catmag_SI = catmag_SR - color_SR_SI
+#
+#     jd_fracts = [0.3 + 0.03 * i for i in range(7)]
+#     jd_mids = [1234567 + jd for jd in jd_fracts]
+#     FITSfile = ['File_' + str(i + 1) for i in range(7)]
+#
+#     t_V, t_R, t_I = -0.51, -0.194, -0.216
+#     untr_SG = catmag_SG - t_V * color_SG_SR
+#     untr_SR = catmag_SR - t_R * color_SR_SI
+#     untr_SI = catmag_SI - t_I * color_SR_SI
+#
+#     row_V = {'Untransformed_MP_Mags': untr_SG, 'Filter': 'V', 'TransformValue': t_V}
+#     row_R = {'Untransformed_MP_Mags': untr_SR, 'Filter': 'R', 'TransformValue': t_R}
+#     row_I = {'Untransformed_MP_Mags': untr_SI, 'Filter': 'I', 'TransformValue': t_I}
+#     dict_list = [row_V, row_R, row_I, row_V, row_I, row_R, row_V]
+#     df = pd.DataFrame(data=dict_list)
+#     df.loc[:, 'JD_mid'] = jd_mids
+#     df.loc[:, 'JD_fract'] = jd_fracts
+#     df.loc[:, 'FITSfile'] = FITSfile
+#     error = [i * 0.0001 for i in [1, -1, 1, -1, 1, -1, 0]]
+#     df.loc[:, 'Untransformed_MP_Mags'] = \
+#         [u + e for (u, e) in zip(df.loc[:, 'Untransformed_MP_Mags'], error)]
+#     return df
 
 
 __________SUPPORT_FUNCTIONS_and_CLASSES = 0
