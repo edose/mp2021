@@ -4,6 +4,7 @@ __author__ = "Eric Dose, Albuquerque"
 import os
 from datetime import datetime, timezone
 from math import pi, cos
+from copy import deepcopy
 
 # External packages:
 import numpy as np
@@ -16,14 +17,10 @@ from astropak.stats import MixedModelFit
 import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
-# from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
-#     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, \
-#     initial_screen_comps, make_df_mp_obs, validate_mp_xy, add_obsairmass_df_comp_obs, \
-#     add_obsairmass_df_mp_obs, add_gr_color_df_comps, add_ri_color_df_comps, write_df_images_csv, \
-#     write_df_comps_csv, write_df_comp_obs_csv, write_df_mp_obs_csv, make_df_masters
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
+COLOR_SUMMARY_FILENAME = 'color_summary.txt'
 
 
 class ColorIniFileError(Exception):
@@ -216,7 +213,7 @@ def make_dfs(print_ap_details=False):
           '\n      (2) run do_color_stepwise()\n')
 
 
-def do_color():
+def do_color(requested_comp_id=None):
     """ Primary color photometry for one color subdirectory.
     Takes the 4 CSV files from make_dfs().
     Gets MP colors in two steps:
@@ -241,8 +238,35 @@ def do_color():
                                                           data_error_exception_type=ColorDataError)
     df_model_raw = common.make_df_model_raw(df_comp_master)  # comps-only data from all used filters.
     df_model = common.mark_user_selections(df_model_raw, color_dict)
+    with open(COLOR_SUMMARY_FILENAME, mode='a') as sf:
+        sf.write('Color Determination (mp2021) for: MP ' + mp_string + '  AN ' + an_string + '\n')
+        sf.flush()
+
+    # #################### TEST ONLY:
+    if requested_comp_id is not None:
+        n_images_required = 7  # based on sequence defined in Color Def .ini file.
+        df_mp_master, color_dict = _replace_mp_with_requested_comp(df_comp_master, requested_comp_id,
+                                                                   n_images_required, color_dict)
+        with open(COLOR_SUMMARY_FILENAME, mode='a') as sf:
+            sf.write('REQUESTED COMP ID = ' + requested_comp_id + '\n')
+            ra = (df_mp_master.loc[:, 'RA_deg'])[0]
+            dec = (df_mp_master.loc[:, 'Dec_deg'])[0]
+            sf.write('RA, Dec = ' + '{0:.4f}'.format(ra) + ' {0:.5f}'.format(dec) + '\n')
+            instmag_0 = (df_mp_master.loc[:, 'InstMag'])[0]
+            sf.write('InstMag_0 = ' + '{0:.5f}'.format(instmag_0) + '\n')
+            sf.flush()
+    # #################### End TEST ONLY code.
+
     color_model_1 = ColorModel_1(df_model, color_dict, color_def_dict, df_mp_master, this_directory)
     color_model_2 = ColorModel_2(color_model_1.df_untransformed_mp_mags)
+
+    # #################### TEST ONLY:
+    if requested_comp_id is not None:
+        with open(COLOR_SUMMARY_FILENAME, mode='a') as sf:
+            sf.write(color_model_1.return_text)
+            sf.write(color_model_2.return_text + '\n\n\n')
+            sf.flush()
+    # #################### End TEST ONLY code.
 
 
 __________SUPPORT_for_do_color____________________________________________ = 0
@@ -269,10 +293,10 @@ class ColorModel_1:
         self.mm_fit = None      # placeholder for the fit result [a MixedModelFit object].
         self.vignette = None    # placeholder for this fit parameter results [a scalar].
 
+        self.return_text = ''
         self._prep_and_do_regression()
         # self._modify_df_usef_mp_obs_for_test_only()
         self.df_untransformed_mp_mags = self._calc_mp_mags()
-        self.return_text = ''
 
     def _prep_and_do_regression(self):
         """ Using MixedModelFit class (which wraps statsmodels.MixedLM.from_formula()).
@@ -367,36 +391,13 @@ class ColorModel_1:
             msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
             print(msg)
             fit_summary_lines.append(msg)
-        self.return_text = 'Regression (mp2021) for: ' + self.this_directory + '\n\n' +\
-            '\n'.join(fit_summary_lines) + '\n\n' +\
-            self.mm_fit.statsmodels_object.summary().as_text() +\
-            '\ncomps = ' + str(n_comps_used) + ' used' +\
-            '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.'
+        self.return_text += (66 * '=') + '\n' +\
+                            self.mm_fit.statsmodels_object.summary().as_text() +\
+                            '\n'.join(fit_summary_lines) +\
+                            'comps = ' + str(n_comps_used) + ' used' +\
+                            '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.'
         common.write_text_file(self.this_directory, 'fit_summary.txt', self.return_text)
 
-
-    # def _modify_df_usef_mp_obs_for_test_only(self):
-    #     i_row = 5  # starting with first row, add modified rows just below it.
-    #
-    #     df_row = self.df_used_mp_obs.iloc[i_row:i_row + 1, :]
-    #     df_row.loc[:, 'Mod Comment'] = '[original]'
-    #     df_list = [df_row]
-    #     mods = [{'column': 'InstMag',  'change': 0.6},
-    #             {'column': 'Vignette', 'change': 1.0},
-    #             {'column': 'ObsAirmass', 'change': 0.7},
-    #             {'column': 'TransformValue', 'change': 0.1},
-    #             {'column': 'ExtinctionValue', 'change': 0.05},
-    #             {'column': 'ZeroPointOffset', 'change': 0.3}]
-    #     for mod in mods:
-    #         df_mod = df_row.copy()
-    #         mod_index = [df_row.index[0] + ' / ' + mod['column']]
-    #         df_mod.index = mod_index
-    #         df_mod[mod['column']] = df_mod[mod['column']] + mod['change']
-    #         df_mod['Mod Comment'] = 'Add ' + str(mod['change']) + ' to ' + mod['column']
-    #         df_list.append(df_mod)
-    #
-    #     self.df_used_mp_obs = pd.concat(df_list)
-    #     iiii = 4
 
     def _calc_mp_mags(self):
         """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
@@ -482,8 +483,8 @@ class ColorModel_2:
             ci_pbs = self.color_def_dict['filters'][f]['transform ci']
             is_in_filter = list(self.df_model['Filter'] == f)
             color_column_name = 'Color_' + '_'.join(ci_pbs)
-            self.df_model.loc[is_in_filter, color_column_name] -= \
-                self.df_model.loc[is_in_filter, 'TransformValue']  # NB: sign is negative.
+            self.df_model.loc[is_in_filter, color_column_name] += \
+                self.df_model.loc[is_in_filter, 'TransformValue']  # NB: *addition* in magnitudes.
 
         # Arrange data and execute Ordinary Least Squares multiple regression:
         df_y = self.df_model[dep_var_name].copy()
@@ -494,7 +495,7 @@ class ColorModel_2:
         warnings.simplefilter('ignore', ValueWarning)
         model = sm.OLS(df_y, df_x)
         results = model.fit()
-        self.return_text = '\n\n' + results.summary()
+        self.return_text += '\n\n\n' + (81 * '=') + '\n' + str(results.summary())
         self.return_text += '\nResidual = ' + '{0:0.1f}'.format(1000 * results.mse_resid**0.5) + ' mMag.'
 
 
@@ -528,7 +529,7 @@ class ColorModel_2:
 #     return df
 
 
-__________SUPPORT_FUNCTIONS_and_CLASSES = 0
+__________SUPPORT_FUNCTIONS_and_CLASSES_________________________ = 0
 
 
 def _get_color_context():
@@ -668,3 +669,85 @@ def _color_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     log_file.write('\n===== ' + calling_function_name + '()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     return context, defaults_dict, color_dict, color_def_dict, log_file
+
+
+__________TESTING_FUNCTIONS_and_CLASSES__________________________ = 0
+
+
+def test_do_color_with_comps():
+    # Make list of comp_ids, write them to file, one per line:
+    context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('do_color_stepwise')
+    this_directory, mp_string, an_string = context
+    filters_to_include = list(color_def_dict['filters'].keys())
+    df_comp_master, _ = common.make_df_masters(this_directory, defaults_dict,
+                                               filters_to_include=filters_to_include,
+                                               require_mp_obs_each_image=True,
+                                               data_error_exception_type=ColorDataError)
+    comp_ids = df_comp_master.loc[:, 'CompID'].drop_duplicates()
+    if os.path.exists(COLOR_SUMMARY_FILENAME):
+        os.remove(COLOR_SUMMARY_FILENAME)
+    for comp_id in comp_ids:
+        do_color(requested_comp_id=comp_id)
+
+
+
+def _replace_mp_with_requested_comp(df_comp_master, comp_id, n_required_comp_obs, color_dict):
+    """ Make all the new data needed to substitute a comp star (with known color) for a minor planet.
+        A quick means to test do_color() with targets of *known* color.
+    :param df_comp_master:
+    :param comp_id:
+    :param n_required_comp_obs:
+    :param color_dict:
+    :return: 2-tuple:
+        (0): new df_mp_master w/ data of one comp. [pandas Dataframe]
+        (1): new color_dict w/pixel positions of one comp. [python OrderedDict]
+    """
+    # Make new dataframe with only comp observations:
+    is_comp_id = (df_comp_master.loc[:, 'CompID'] == comp_id)
+    new_df = df_comp_master.loc[is_comp_id, :].copy()
+    if len(new_df) != n_required_comp_obs:
+        return None, None
+
+    # Also, update color_dict with comp pixel positions, in place of normal MP pixel positions.
+    new_xy_list = []
+    for i, item in enumerate(color_dict['mp xy']):
+        filename = item[0]
+        x = new_df.loc[new_df['FITSfile'] == filename, 'Xcentroid']
+        y = new_df.loc[new_df['FITSfile'] == filename, 'Ycentroid']
+        new_xy_list.append(tuple([filename, x, y]))
+    new_color_dict = deepcopy(color_dict)
+    new_color_dict['mp xy'] = new_xy_list
+
+    return new_df, new_color_dict
+
+
+
+# def make_test_df_untransformed():
+# THIS WORKED VERY WELL, JULY 2, 2021.
+#     catmag_SR = 14.1
+#     color_SG_SR = +0.225
+#     color_SR_SI = +0.207
+#     catmag_SG = catmag_SR + color_SG_SR
+#     catmag_SI = catmag_SR - color_SR_SI
+#
+#     jd_fracts = [0.3 + 0.03 * i for i in range(7)]
+#     jd_mids = [1234567 + jd for jd in jd_fracts]
+#     FITSfile = ['File_' + str(i + 1) for i in range(7)]
+#
+#     t_V, t_R, t_I = -0.51, -0.194, -0.216
+#     untr_SG = catmag_SG - t_V * color_SG_SR
+#     untr_SR = catmag_SR - t_R * color_SR_SI
+#     untr_SI = catmag_SI - t_I * color_SR_SI
+#
+#     row_V = {'Untransformed_MP_Mags': untr_SG, 'Filter': 'V', 'TransformValue': t_V}
+#     row_R = {'Untransformed_MP_Mags': untr_SR, 'Filter': 'R', 'TransformValue': t_R}
+#     row_I = {'Untransformed_MP_Mags': untr_SI, 'Filter': 'I', 'TransformValue': t_I}
+#     dict_list = [row_V, row_R, row_I, row_V, row_I, row_R, row_V]
+#     df = pd.DataFrame(data=dict_list)
+#     df.loc[:, 'JD_mid'] = jd_mids
+#     df.loc[:, 'JD_fract'] = jd_fracts
+#     df.loc[:, 'FITSfile'] = FITSfile
+#     error = [i * 0.0001 for i in [1, -1, 1, -1, 1, -1, 0]]
+#     df.loc[:, 'Untransformed_MP_Mags'] = \
+#         [u + e for (u, e) in zip(df.loc[:, 'Untransformed_MP_Mags'], error)]
+#     return df
