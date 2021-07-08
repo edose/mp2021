@@ -612,7 +612,7 @@ def _make_session_diagnostic_plots(model, df_model):
 
     # Delete any previous plot files from current directory:
     session_plot_filenames = [f for f in os.listdir('.')
-                       if f.startswith(SESSION_PLOT_FILE_PREFIX) and f.endswith('.png')]
+                              if f.startswith(SESSION_PLOT_FILE_PREFIX) and f.endswith('.png')]
     for f in session_plot_filenames:
         os.remove(f)
 
@@ -682,7 +682,7 @@ def _make_session_diagnostic_plots(model, df_model):
     ax = axes[0, 2]
     make_9_subplot(ax, 'Instrument Magnitude Uncertainty', 'Catalog Mag (r)', 'mMag', '', True,
                    x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['InstMagSigma'])
-    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=model.df_mp_mags['InstMagSigma'],
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=1000.8 * model.df_mp_mags['InstMagSigma'],
                s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
 
     # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
@@ -869,7 +869,7 @@ def make_9_subplot(ax, title, x_label, y_label, text, zero_line, x_data, y_data,
     """
     ax.set_title(title, loc='center', pad=-3)  # pad in points
     ax.set_xlabel(x_label, labelpad=-29)  # labelpad in points
-    ax.set_ylabel(y_label, labelpad=-5)  # "
+    ax.set_ylabel(y_label, labelpad=0)  # "
     ax.text(x=0.5, y=0.95, s=text,
             horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
     if zero_line is True:

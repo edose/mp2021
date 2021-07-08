@@ -3,13 +3,15 @@ __author__ = "Eric Dose, Albuquerque"
 # Python core:
 import os
 from datetime import datetime, timezone
-from math import pi, cos
+from math import pi, cos, floor
 from copy import deepcopy
 
 # External packages:
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 # Author's packages:
 import astropak.util
@@ -17,10 +19,12 @@ from astropak.stats import MixedModelFit
 import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
+from mp2021.session import make_qq_plot_fullpage, make_9_subplot, draw_x_line
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 COLOR_SUMMARY_FILENAME = 'color_summary.txt'
+COLOR_PLOT_FILE_PREFIX = 'Image_Color_'
 
 
 class ColorIniFileError(Exception):
@@ -259,6 +263,7 @@ def do_color(requested_comp_id=None):
 
     color_model_1 = ColorModel_1(df_model, color_dict, color_def_dict, df_mp_master, this_directory)
     color_model_2 = ColorModel_2(color_model_1.df_untransformed_mp_mags)
+    _make_color_diagnostic_plots(df_model, color_model_1, color_model_2)
 
     # #################### TEST ONLY:
     if requested_comp_id is not None:
@@ -272,8 +277,6 @@ def do_color(requested_comp_id=None):
 __________SUPPORT_for_do_color____________________________________________ = 0
 
 
-# TODO: (1) alter ColorModel_1 to use approximate zero-point offsets, allow random vars to take up residual.
-# TODO: (2) decide whether ColorModel_2 should fit to (untransf) MP mags, or to MP InstMags.
 class ColorModel_1:
     """ Generates and holds mixed-model regression model suitable to MP color index determination.
         Makes estimates ("predictions") for partial MP magnitudes (partial, because still need to be
@@ -434,12 +437,12 @@ class ColorModel_2:
         context, defaults_dict, color_dict, color_def_dict, log_file = _color_setup('ColorModel_2')
         self.df_model = df_untransformed_mp_mags
         self.color_def_dict = color_def_dict
+        self.results = None
         self.return_text = ''
-        self._prep_and_do_regression(include_dt2=False)
-        self._prep_and_do_regression(include_dt2=True)
+        self._prep_and_do_regression(include_dt2=color_dict['fit dt2'])
         print(self.return_text + '\n')
 
-    def _prep_and_do_regression(self, include_dt2=True):
+    def _prep_and_do_regression(self, include_dt2=False):
         """ Using ordinary least squares regression to extract color values for MP.
         :param include_dt2: True iff quadratic time parameter to be included, else False. [boolean]
         :return: [None]
@@ -494,39 +497,210 @@ class ColorModel_2:
         from statsmodels.tools.sm_exceptions import ValueWarning
         warnings.simplefilter('ignore', ValueWarning)
         model = sm.OLS(df_y, df_x)
-        results = model.fit()
-        self.return_text += '\n\n\n' + (81 * '=') + '\n' + str(results.summary())
-        self.return_text += '\nResidual = ' + '{0:0.1f}'.format(1000 * results.mse_resid**0.5) + ' mMag.'
+        self.results = model.fit()
+        self.return_text += '\n\n\n' + (81 * '=') + '\n' + str(self.results.summary())
+        self.return_text += '\nResidual = ' + \
+                            '{0:0.1f}'.format(1000 * self.results.mse_resid**0.5) + ' mMag.'
 
 
-# def make_test_df_untransformed():
-#     catmag_SR = 14.1
-#     color_SG_SR = +0.225
-#     color_SR_SI = +0.207
-#     catmag_SG = catmag_SR + color_SG_SR
-#     catmag_SI = catmag_SR - color_SR_SI
-#
-#     jd_fracts = [0.3 + 0.03 * i for i in range(7)]
-#     jd_mids = [1234567 + jd for jd in jd_fracts]
-#     FITSfile = ['File_' + str(i + 1) for i in range(7)]
-#
-#     t_V, t_R, t_I = -0.51, -0.194, -0.216
-#     untr_SG = catmag_SG - t_V * color_SG_SR
-#     untr_SR = catmag_SR - t_R * color_SR_SI
-#     untr_SI = catmag_SI - t_I * color_SR_SI
-#
-#     row_V = {'Untransformed_MP_Mags': untr_SG, 'Filter': 'V', 'TransformValue': t_V}
-#     row_R = {'Untransformed_MP_Mags': untr_SR, 'Filter': 'R', 'TransformValue': t_R}
-#     row_I = {'Untransformed_MP_Mags': untr_SI, 'Filter': 'I', 'TransformValue': t_I}
-#     dict_list = [row_V, row_R, row_I, row_V, row_I, row_R, row_V]
-#     df = pd.DataFrame(data=dict_list)
-#     df.loc[:, 'JD_mid'] = jd_mids
-#     df.loc[:, 'JD_fract'] = jd_fracts
-#     df.loc[:, 'FITSfile'] = FITSfile
-#     error = [i * 0.0001 for i in [1, -1, 1, -1, 1, -1, 0]]
-#     df.loc[:, 'Untransformed_MP_Mags'] = \
-#         [u + e for (u, e) in zip(df.loc[:, 'Untransformed_MP_Mags'], error)]
-#     return df
+def _make_color_diagnostic_plots(df_model, color_model_1, color_model_2):
+    """  Display and write to file several diagnostic plots, to:
+     * decide which obs, comps, images might need removal by editing color.ini, and
+     * possibly adjust regression parameters, also by editing color.ini (unusual). """
+    context, defaults_dict, color_dict, color_def_dict, log_file = \
+        _color_setup('_make_color_diagnostic_plots')
+    this_directory, mp_string, an_string = context
+
+    # Delete any previous plot files from current directory:
+    color_plot_filenames = [f for f in os.listdir('.')
+                            if f.startswith(COLOR_PLOT_FILE_PREFIX) and f.endswith('.png')]
+    for f in color_plot_filenames:
+        os.remove(f)
+
+    # Wrangle needed data into convenient forms (adapted from session.py):
+    df_plot_comp_obs = pd.merge(left=df_model.loc[df_model['UseInModel'], :].copy(),
+                                right=color_model_1.mm_fit.df_observations,
+                                how='left', left_index=True, right_index=True, sort=False)
+    df_plot_comp_obs = pd.merge(left=df_plot_comp_obs,
+                                right=color_model_1.df_used_comp_obs['InstMag_with_offsets'],
+                                how='left', left_index=True, right_index=True, sort=False)
+    df_image_effect = color_model_1.mm_fit.df_random_effects
+    df_image_effect.rename(columns={"GroupName": "FITSfile", "Group": "ImageEffect"}, inplace=True)
+    sigma = color_model_1.mm_fit.sigma
+    comp_ids = df_plot_comp_obs['CompID'].drop_duplicates()
+    n_comps = len(comp_ids)
+    jd_floor = floor(min(df_model['JD_mid']))
+    xlabel_jd = 'JD(mid)-' + str(jd_floor)
+    mp_mag_sr = color_model_2.results.params.const
+    color_sr_si = color_model_2.results.params.Color_SR_SI
+    n_color_points = len(color_model_2.df_model)
+
+# ################ SESSION FIGURE 1: Q-Q plot of mean comp effects (1 pt per comp star used in model).
+    window_title = 'Color Q-Q (by comp):  MP ' + mp_string + '   AN ' + an_string
+    page_title = 'Color: MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q by comp (mean residual)'
+    plot_annotation = str(n_comps) + ' comps used in color model.' + '\n(tags: comp star ID)'
+    df_y = df_plot_comp_obs.loc[:, ['CompID', 'Residual']].groupby(['CompID']).mean()
+    df_y = df_y.sort_values(by='Residual')
+    y_data = df_y['Residual'] * 1000.0  # for millimags
+    y_labels = df_y.index.values
+    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
+                          COLOR_PLOT_FILE_PREFIX + '1_QQ_comps.png')
+
+    # ################ SESSION FIGURE 2: Q-Q plot of comp residuals (one point per comp obs).
+    window_title = 'Color Q-Q (by comp observation):  MP ' + mp_string + '   AN ' + an_string
+    page_title = 'Color: MP ' + mp_string + '   AN ' + an_string + '   ::   Q-Q by comp observation'
+    plot_annotation = str(len(df_plot_comp_obs)) + ' observations of ' + \
+                      str(n_comps) + ' comps used in model.' + '\n (tags: observation ID)'
+    df_y = df_plot_comp_obs.loc[:, ['ObsID', 'Residual']]
+    df_y = df_y.sort_values(by='Residual')
+    y_data = df_y['Residual'] * 1000.0  # for millimags
+    y_labels = df_y['ObsID'].values
+    make_qq_plot_fullpage(window_title, page_title, plot_annotation, y_data, y_labels,
+                          COLOR_PLOT_FILE_PREFIX + '2_QQ_obs.png')
+
+    # ################ SESSION FIGURE 3: Catalog and Time plots:
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches"
+    fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+    fig.suptitle('Color: MP ' + mp_string + '   AN ' + an_string + '   ::    catalog and time plots',
+                 color='darkblue', fontsize=20)
+    fig.canvas.set_window_title('Color: Catalog and Time Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+    subplot_text = 'rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+    fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+
+    # Catalog mag uncertainty plot (comps only, one point per comp, x=cat r mag, y=cat r uncertainty):
+    ax = axes[0, 0]
+    make_9_subplot(ax, 'Catalog Mag Uncertainty (dr)', 'Catalog Mag (r)', 'mMag', '', False,
+                   x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['dr'])
+
+    # Catalog color plot (comps only, one point per comp, x=cat r mag, y=cat color (r-i)):
+    ax = axes[0, 1]
+    make_9_subplot(ax, 'Catalog Color Index', 'Catalog Mag (r)', 'CI Mag', '', zero_line=False,
+                   x_data=df_plot_comp_obs['r'], y_data=(df_plot_comp_obs['r'] - df_plot_comp_obs['i']))
+    ax.scatter(x=n_color_points * [mp_mag_sr], y=n_color_points * [color_sr_si],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Inst Mag plot (comps only, one point per obs, x=cat r mag, y=InstMagSigma):
+    ax = axes[0, 2]
+    make_9_subplot(ax, 'Instrument Magnitude Uncertainty', 'Catalog Mag (r)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['r'], y_data=1000.0 * df_plot_comp_obs['InstMagSigma'])
+    ax.scatter(x=n_color_points * [mp_mag_sr], y=1000.0 * color_model_1.df_used_mp_obs['InstMagSigma'],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
+    ax = axes[1, 0]
+    df_this_plot = pd.merge(df_image_effect, df_plot_comp_obs.loc[:, ['FITSfile', 'JD_fract']],
+                            how='left', on='FITSfile', sort=False).drop_duplicates()
+    make_9_subplot(ax, 'Image effect (cirrus plot)', xlabel_jd, 'mMag', '', False,
+                   x_data=df_this_plot['JD_fract'], y_data=1000.0 * df_this_plot['ImageEffect'],
+                   alpha=1.0, jd_locators=True)
+    ax.invert_yaxis()  # per custom of plotting magnitudes brighter=upward
+
+    # SkyADU plot (comps only, one point per obs: x=JD_fract, y=SkyADU):
+    ax = axes[1, 1]
+    make_9_subplot(ax, 'SkyADU vs time', xlabel_jd, 'ADU', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['SkyADU'],
+                   jd_locators=True)
+
+    # FWHM plot (comps only, one point per obs: x=JD_fract, y=FWHM):
+    ax = axes[1, 2]
+    make_9_subplot(ax, 'FWHM vs time', xlabel_jd, 'FWHM (pixels)', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['FWHM'],
+                   jd_locators=True)
+
+    # InstMagSigma plot (comps only, one point per obs; x=JD_fract, y=InstMagSigma):
+    ax = axes[2, 0]
+    make_9_subplot(ax, 'Inst Mag Sigma vs time', xlabel_jd, 'mMag', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['InstMagSigma'],
+                   jd_locators=True)
+
+    # Obs.Airmass plot (comps only, one point per obs; x=JD_fract, y=ObsAirmass):
+    ax = axes[2, 1]
+    make_9_subplot(ax, 'Obs.Airmass vs time', xlabel_jd, 'Obs.Airmass', '', False,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=df_plot_comp_obs['ObsAirmass'],
+                   jd_locators=True)
+
+    # Skip Sloan r' vs time (lightcurve) as meaningless for color determination, and remove empty plot:
+    axes[2, 2].remove()
+
+    plt.show()
+    fig.savefig(COLOR_PLOT_FILE_PREFIX + '3_Catalog_and_Time.png')
+
+    # ################ SESSION FIGURE 4: Residual plots:
+    fig, axes = plt.subplots(ncols=3, nrows=3, figsize=(11, 8.5))  # (width, height) in "inches", was 15, 9
+    fig.tight_layout(rect=(0, 0, 1, 0.925))  # rect=(left, bottom, right, top) for entire fig
+    fig.subplots_adjust(left=0.06, bottom=0.06, right=0.94, top=0.85, wspace=0.25, hspace=0.325)
+    fig.suptitle('Color: MP ' + mp_string + '   AN ' + an_string + '    ::    residual plots',
+                 color='darkblue', fontsize=20)
+    fig.canvas.set_window_title('Color: Residual Plots: ' + 'MP ' + mp_string + '   AN ' + an_string)
+    subplot_text = str(len(df_plot_comp_obs)) + ' obs   ' + \
+                   str(n_comps) + ' comps    ' + \
+                   'sigma=' + '{0:.0f}'.format(1000.0 * sigma) + ' mMag' + \
+                   (12 * ' ') + ' rendered {:%Y-%m-%d  %H:%M UTC}'.format(datetime.now(timezone.utc))
+    fig.text(s=subplot_text, x=0.5, y=0.92, horizontalalignment='center', fontsize=12, color='dimgray')
+
+    # Comp residual plot (comps only, one point per obs: x=catalog r mag, y=model residual):
+    ax = axes[0, 0]
+    make_9_subplot(ax, 'Model residual vs r (catalog)', 'Catalog Mag (r)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['r'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+    # TODO: put derived r' mag in place of 'MP_Mags' (for every plot spec where it appears).
+    ax.scatter(x=n_color_points * [mp_mag_sr], y=n_color_points * [0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+    draw_x_line(ax, color_dict['min catalog r mag'])
+    draw_x_line(ax, color_dict['max catalog r mag'])
+
+    # Comp residual plot (comps only, one point per obs: x=raw Instrument Mag, y=model residual):
+    ax = axes[0, 1]
+    make_9_subplot(ax, 'Model residual vs raw Instrument Mag', 'Raw instrument mag', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['InstMag'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+    ax.scatter(x=color_model_1.df_used_mp_obs['InstMag'], y=len(color_model_1.df_used_mp_obs) * [0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Comp residual plot (comps only, one point per obs: x=catalog r-i color, y=model residual):
+    ax = axes[0, 2]
+    make_9_subplot(ax, 'Model residual vs Color Index (cat)', 'Catalog Color (r-i)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['r'] - df_plot_comp_obs['i'],
+                   y_data=1000.0 * df_plot_comp_obs['Residual'])
+    ax.scatter([color_sr_si], y=[0.0],
+               s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
+
+    # Comp residual plot (comps only, one point per obs: x=Julian Date fraction, y=model residual):
+    ax = axes[1, 0]
+    make_9_subplot(ax, 'Model residual vs JD', xlabel_jd, 'mMag', '', True,
+                   x_data=df_plot_comp_obs['JD_fract'], y_data=1000.0 * df_plot_comp_obs['Residual'],
+                   jd_locators=True)
+
+    # Comp residual plot (comps only, one point per obs: x=ObsAirmass, y=model residual):
+    ax = axes[1, 1]
+    make_9_subplot(ax, 'Model residual vs Obs.Airmass', 'ObsAirmass', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['ObsAirmass'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+
+    # Comp residual plot (comps only, one point per obs: x=Sky Flux (ADUs), y=model residual):
+    ax = axes[1, 2]
+    make_9_subplot(ax, 'Model residual vs Sky Flux', 'Sky Flux (ADU)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['SkyADU'], y_data=1000.0 * df_plot_comp_obs['Residual'])
+
+    # Comp residual plot (comps only, one point per obs: x=X in images, y=model residual):
+    ax = axes[2, 0]
+    make_9_subplot(ax, 'Model residual vs X in image', 'X from center (pixels)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['X1024'] * 1024.0, y_data=1000.0 * df_plot_comp_obs['Residual'])
+    draw_x_line(ax, 0.0)
+
+    # Comp residual plot (comps only, one point per obs: x=Y in images, y=model residual):
+    ax = axes[2, 1]
+    make_9_subplot(ax, 'Model residual vs Y in image', 'Y from center (pixels)', 'mMag', '', True,
+                   x_data=df_plot_comp_obs['Y1024'] * 1024.0, y_data=1000.0 * df_plot_comp_obs['Residual'])
+    draw_x_line(ax, 0.0)
+
+    # Comp residual plot (comps only, one point per obs: x=vignette (dist from center), y=model residual):
+    ax = axes[2, 2]
+    make_9_subplot(ax, 'Model residual vs distance from center', 'dist from center (pixels)', 'mMag',
+                   '', True,
+                   x_data=1024*np.sqrt(df_plot_comp_obs['Vignette']),
+                   y_data=1000.0 * df_plot_comp_obs['Residual'])
+
+    plt.show()
+    fig.savefig(COLOR_PLOT_FILE_PREFIX + '4_Residuals.png')
 
 
 __________SUPPORT_FUNCTIONS_and_CLASSES_________________________ = 0
@@ -644,7 +818,7 @@ def _write_color_ini_stub(this_directory, filenames_temporal_order, mean_datetim
         extinction_lines + \
         ['# Transforms copied from Instrument file \'' + defaults_dict['instrument ini'] + '\'.'] +\
         transform_lines + \
-        ['Fit Vignette = Yes']
+        ['Fit DT2 = No']
     raw_lines = header_lines + ini_lines + color_definition_lines +\
         mp_location_lines + selection_criteria_lines + regression_lines
     ready_lines = [line + '\n' for line in raw_lines]

@@ -19,4 +19,4 @@ Max Catalog ri color = float -> max catalog ri color
 [Regression]
 Extinctions    = string list -> extinctions
 Transforms     = string list -> transforms
-Fit Vignette   = boolean     -> fit vignette
+Fit DT2   = boolean     -> fit dt2
