@@ -275,6 +275,8 @@ def make_df_comp_obs(comp_apertures, df_comps, instrument, df_images):
                         'Dec_deg': df_comps.loc[ap.source_id, 'Dec_deg']}
                     comp_obs_dict_list.append(comp_obs_dict)
     df_comp_obs = pd.DataFrame(data=comp_obs_dict_list)
+    if len(df_comp_obs) <= 0:
+        raise ValueError('No valid comp observations are available.')
     df_comp_obs.index = df_comp_obs['ObsID'].values
     df_comp_obs = df_comp_obs.sort_values(by='ObsID', key=lambda ids: ids.astype('int64'))
     return df_comp_obs
@@ -588,9 +590,11 @@ def read_mp2021_csv(this_directory, filename, dtype_dict=None):
     return df
 
 
-def make_df_masters(this_directory, defaults_dict, filters_to_include=None, require_mp_obs_each_image=True,
+def make_df_masters(this_directory, defaults_dict, filters_to_include=None,
+                    require_mp_obs_each_image=True,
                     data_error_exception_type=ValueError):
-    """ Get, screen and merge dataframes df_images_all, df_comps_all, df_comp_obs_all, and df_mp_obs_all
+    """ Get, screen and merge dataframes df_images_all, df_comps_all,
+        df_comp_obs_all, and df_mp_obs_all
         into two master dataframes dataframe df_comp_master and df_mp_master.
         USAGE (typical):
     :param this_directory:
@@ -652,8 +656,8 @@ def make_df_masters(this_directory, defaults_dict, filters_to_include=None, requ
 
 
 def make_df_model_raw(df_comp_master):
-    """ Assemble and return df_model, the comp-only dataframe containing all input data need for the
-        mixed-model regression at the center of this lightcurve workflow.
+    """ Assemble and return df_model, the comp-only dataframe containing all input data
+        needed for the mixed-model regression at the center of this lightcurve workflow.
         Keep only comps that are present in every image.
     :param df_comp_master:
     :return: df_model, one row per comp observation [pandas Dataframe]

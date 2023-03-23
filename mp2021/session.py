@@ -1,15 +1,17 @@
+""" This module: Workflow for MP (minor planet) photometry.
+    The workflow is applied to a "session" = one MP's images from one imaging night.
+    Intended for lightcurves in support of determining MP rotation rates.
+"""
 __author__ = "Eric Dose, Albuquerque"
 
-""" This module: Workflow for MP (minor planet) photometry. 
-    The workflow is applied to a "session" = one MP's images from one imaging night.
-    Intended for lightcurves in support of determining MP rotation rates.    
-"""
 
 # Python core:
 import os
 from datetime import datetime, timezone
 from collections import Counter
 from math import floor, ceil
+import copy
+from typing import Tuple
 
 # External packages:
 import numpy as np
@@ -25,7 +27,8 @@ import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
 # from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
-#     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars, initial_screen_comps, \
+#     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars,
+#     initial_screen_comps, \
 #     make_df_mp_obs, write_df_images_csv, write_df_comps_csv, write_df_comp_obs_csv, \
 #     write_df_mp_obs_csv, write_text_file, validate_mp_xy, add_obsairmass_df_comp_obs, \
 #     add_obsairmass_df_mp_obs, add_ri_color_df_comps, make_df_masters
@@ -45,6 +48,7 @@ ALCDEF_BASE_DATA = {'contactname': 'Eric V. Dose',
                     'filter': 'C',
                     'magband': 'SR'}
 SESSION_PLOT_FILE_PREFIX = 'Image_Session_'
+PASSBAND_NAMES = {'SG': 'g', 'SR': 'r', 'SI': 'i'}  # local name: catalog name.
 
 
 class SessionIniFileError(Exception):
@@ -210,7 +214,8 @@ def make_dfs(print_ap_details=False):
 
     # Make comp-star apertures, comps dataframe, and comp obs dataframe:
     df_comps = common.make_df_comps(refcat2)
-    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap, background_width)
+    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap,
+                                                     background_width)
     df_comp_obs = common.make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
 
     # Make MP apertures and MP obs dataframe:
@@ -242,13 +247,15 @@ def make_dfs(print_ap_details=False):
 
 
 def do_session():
-    """ Primary lightcurve photometry for one session. Takes all data incl. color index, generates:
+    """ Primary lightcurve photometry for one session.
+    Takes all data incl. color index, generates:
     Takes the 4 CSV files from make_dfs().
     Generates:
     * diagnostic plots for iterative regression refinement,
     * results in Canopus-import format,
     * ALCDEF-format file.
-    Typically iterated, pruning comp-star ranges and outliers, until converged and then simply stop.
+    Typically iterated, pruning comp-star ranges and outliers, until converged
+        and then simply stop.
     NB: One may choose the FITS files by filter (typically 'Clear' or 'BB'), but
         * output lightcurve passband is fixed as Sloan 'r', and
         * color index is fixed as Sloan (r-i).
@@ -257,87 +264,28 @@ def do_session():
     """
     context, defaults_dict, session_dict, log_file = _session_setup('do_session')
     this_directory, mp_string, an_string, filter_string = context
-    log_filename = defaults_dict['session log filename']
-    log_file = open(log_filename, mode='a')
+    # log_filename = defaults_dict['session log filename']
+    # log_file = open(log_filename, mode='a')
     mp_int = int(mp_string)  # put this in try/catch block.
     mp_string = str(mp_int)
     site_dict = ini.make_site_dict(defaults_dict)
 
-    df_comp_master, df_mp_master = common.make_df_masters(this_directory, defaults_dict,
-                                                          filters_to_include=filter_string,
-                                                          require_mp_obs_each_image=True,
-                                                          data_error_exception_type=SessionDataError)
+    df_comp_master, df_mp_master = \
+        common.make_df_masters(this_directory, defaults_dict,
+                               filters_to_include=filter_string,
+                               require_mp_obs_each_image=True,
+                               data_error_exception_type=SessionDataError)
     df_model_raw = common.make_df_model_raw(df_comp_master)  # comps only.
     df_model = common.mark_user_selections(df_model_raw, session_dict)
-    model = SessionModel(df_model, filter_string, session_dict, df_mp_master, this_directory)
+    model = SessionModel(df_model, filter_string, session_dict, df_mp_master,
+                         this_directory)
 
     _write_mpfile_line(mp_string, an_string, model)
     _write_canopus_file(mp_string, an_string, this_directory, model)
-    _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model)
+    _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict,
+                       this_directory, model)
     _make_session_diagnostic_plots(model, df_model)
 
-
-def do_transform(filter='V', target_passband='SG', color_index=('SG', 'SR'), order=1):
-    """ Get transform, from images in filter, to Sloan passband, against Sloan color index.
-        Minimal version of do_session, dedicated to the purpose, using comps only. No MP functions.
-    :param filter: name of filter. [string]
-    :param target_passband: name of target passband, from 'SG', 'SR', or 'SI'. [string]
-    :param color_index: two passbands defining transform color index, from ('SG', 'SR') or ('SR', 'SI').
-        [2-tuple of strings]
-    :param order: transform order, either 1 or 2 (1 is linear and the usual, 2 is quadratic). [int]
-    :return: [None]
-    """
-    context, defaults_dict, session_dict, log_file = _session_setup('do_session')
-    this_directory, mp_string, an_string, filter_string = context
-    mp_int = int(mp_string)  # put this in try/catch block.
-    mp_string = str(mp_int)
-    site_dict = ini.make_site_dict(defaults_dict)
-    df_comp_master, df_mp_master = common.make_df_masters(this_directory, defaults_dict,
-                                                          filters_to_include=filter,
-                                                          require_mp_obs_each_image=True,
-                                                          data_error_exception_type=SessionDataError)
-    df_model_raw = common.make_df_model_raw(df_comp_master)  # comps only.
-    df_model = common.mark_user_selections(df_model_raw, session_dict)
-    df_used_comps_obs = df_model.copy().loc[df_model['UseInModel'], :]
-    fixed_effect_var_list = []
-    if session_dict['fit vignette']:
-        fixed_effect_var_list.append('Vignette')
-
-    # Set catmag offset to dep var:
-    target_passband_column_name = common.CATMAG_PASSBAND_COLUMN_LOOKUP[target_passband]
-    catmag_offset = df_used_comps_obs[target_passband_column_name].astype(float)
-
-    # Set transform (color index) indep var(s):
-    color_index_column_name = common.TRANSFORM_COLUMN_LOOKUP[color_index]
-    df_used_comps_obs['CI'] = df_used_comps_obs[color_index_column_name]
-    fixed_effect_var_list.append('CI')
-    if order == 2:
-        df_used_comps_obs['CI2'] = [ci ** 2 for ci in df_used_comps_obs['CI']]
-        fixed_effect_var_list.append('CI2')
-
-    # Set extinction*airmass offset to dep var:
-    extinction = float(session_dict['fit extinction'][1])
-    extinction_offset = (extinction * df_used_comps_obs['ObsAirmass']).astype(float)
-
-    random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
-    dep_var_name = 'InstMag_with_offsets'
-    dep_var_offset = catmag_offset + extinction_offset
-    df_used_comps_obs[dep_var_name] = df_used_comps_obs['InstMag'] - dep_var_offset
-
-    import warnings
-    from statsmodels.tools.sm_exceptions import ConvergenceWarning
-    warnings.simplefilter('ignore', ConvergenceWarning)
-    mm_fit = MixedModelFit(data=df_used_comps_obs,
-                           dep_var=dep_var_name,
-                           fixed_vars=fixed_effect_var_list,
-                           group_var=random_effect_var_name)
-    n_comps_used = len(df_used_comps_obs['CompID'].drop_duplicates())
-    print(mm_fit.statsmodels_object.summary())
-    print('comps =', str(n_comps_used), ' used.')
-    print('sigma =', '{0:.1f}'.format(1000.0 * mm_fit.sigma), 'mMag.')
-    if not mm_fit.converged:
-        msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
-        print(msg)
 
 
 _____SUPPORT_for_make_dfs_____________________________________________ = 0
@@ -361,7 +309,8 @@ class SessionModel:
         self.df_model = df_model
         self.filter_string = filter_string
         self.session_dict = session_dict
-        self.df_used_comps_obs = self.df_model.copy().loc[self.df_model['UseInModel'], :]
+        self.df_used_comps_obs = \
+            self.df_model.copy().loc[self.df_model['UseInModel'], :]
         images_in_used_comps = self.df_used_comps_obs['FITSfile'].drop_duplicates()
         mp_rows_to_use = df_mp_master['FITSfile'].isin(images_in_used_comps)
         self.df_used_mp_obs = df_mp_master.loc[mp_rows_to_use, :]
@@ -404,14 +353,17 @@ class SessionModel:
         elif transform_option[0] == 'use':
             if len(transform_option) == 2:
                 transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI']
+                msg = ' Transform (Color Index) not fit: 1st-order value fixed at' + \
+                      transform_option[1]
             elif len(transform_option) == 3:
                 transform_offset = float(transform_option[1]) * self.df_used_comps_obs['CI'] +\
                                    float(transform_option[2]) * self.df_used_comps_obs['CI2']
+                msg = ' Transform (Color Index) not fit: 1st, 2nd order values fixed at' + \
+                      transform_option[1] + transform_option[2]
             else:
                 raise SessionSpecificationError('Invalid \'Fit Transform\' option in session.ini')
             dep_var_offset += transform_offset
-            msg = ' Transform (Color Index) not fit: 1st, 2nd order values fixed at' + \
-                  transform_option[1] + transform_option[2]
+
         else:
             raise SessionSpecificationError('Invalid \'Fit Transform\' option in session.ini')
 
@@ -456,6 +408,7 @@ class SessionModel:
         print(self.mm_fit.statsmodels_object.summary())
         print('comps =', str(n_comps_used), ' used.')
         print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
+        print('mean ri color =', '{0:.3f}'.format(self.df_used_comps_obs['ri_color'].mean()))
         if not self.mm_fit.converged:
             msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
             print(msg)
@@ -520,85 +473,6 @@ def _write_canopus_file(mp_string, an_string, this_directory, model):
                           for (jd, mag, s, f) in zip(df['JD_mid'], df['MP_Mags'],
                                                      df['InstMagSigma'], df['FITSfile'])])
     fullpath = os.path.join(this_directory, 'canopus_MP_' + mp_string + '_' + an_string + '.txt')
-    with open(fullpath, 'w') as f:
-        f.write(fulltext)
-
-
-def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model):
-    mpfile_names = util.all_mpfile_names(defaults_dict['mpfile directory'])
-    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string + '_')]
-    if len(name_list) <= 0:
-        print(' >>>>> WARNING: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')
-        return
-    if len(name_list) >= 2:
-        print(' >>>>> WARNING: Multiple MPfiles were found for MP', mp_string, '--> NO ALCDEF file written')
-        return
-    mpfile = util.MPfile(name_list[0])
-    df = model.df_mp_mags
-
-    # Build data that will go into file:
-    lines = list()
-    lines.append('# ALCDEF file for MP ' + mp_string + '  AN ' + an_string + ' (mp2021 workflow)')
-    lines.append('STARTMETADATA')
-    lines.append('REVISEDDATA=FALSE')
-    lines.append('OBJECTNUMBER=' + mp_string)
-    lines.append('OBJECTNAME=' + mpfile.name)
-    lines.append('ALLOWSHARING=TRUE')
-    # lines.append('MPCDESIG=')
-    lines.append('CONTACTNAME=' + ALCDEF_BASE_DATA['contactname'])
-    lines.append('CONTACTINFO=' + ALCDEF_BASE_DATA['contactinfo'])
-    lines.append('OBSERVERS=' + ALCDEF_BASE_DATA['observers'])
-    if site_dict['longitude'] <= 180:
-        alcdef_longitude = site_dict['longitude']
-    else:
-        alcdef_longitude = site_dict['longitude'] - 360.0
-    lines.append('OBSLONGITUDE=' + '{0:.4f}'.format(alcdef_longitude))
-    lines.append('OBSLATITUDE=' + '{0:.4f}'.format(site_dict['latitude']))
-    lines.append('FACILITY=' + site_dict['name'])
-    lines.append('MPCCODE=' + site_dict['mpc code'])
-    # lines.append('PUBLICATION=')
-    jd_session_start = min(df['JD_mid'])
-    jd_session_end = max(df['JD_mid'])
-    jd_session_mid = (jd_session_start + jd_session_end) / 2.0
-    utc_session_mid = datetime_utc_from_jd(jd_session_mid)  # (needed below)
-    dt_split = utc_session_mid.isoformat().split('T')
-    lines.append('SESSIONDATE=' + dt_split[0])
-    lines.append('SESSIONTIME=' + dt_split[1].split('+')[0].split('.')[0])
-    lines.append('FILTER=' + ALCDEF_BASE_DATA['filter'])
-    lines.append('MAGBAND=' + ALCDEF_BASE_DATA['magband'])
-    lines.append('LTCTYPE=NONE')
-    # lines.append('LTCDAYS=0')
-    # lines.append('LTCAPP=NONE')
-    lines.append('REDUCEDMAGS=NONE')
-    session_eph_dict = mpfile.eph_from_utc(utc_session_mid)
-    # earth_mp_au = session_eph_dict['Delta']
-    # sun_mp_au = session_eph_dict['R']
-    # reduced_mag_correction = -5.0 * log10(earth_mp_au * sun_mp_au)
-    #  lines.append('UCORMAG=' + '{0:.4f}'.format(reduced_mag_correction))  # removed to avoid confusion.
-    lines.append('OBJECTRA=' + ra_as_hours(session_eph_dict['RA']).rsplit(':', 1)[0])
-    lines.append('OBJECTDEC=' + ' '.join(dec_as_hex(round(session_eph_dict['Dec'])).split(':')[0:2]))
-    lines.append('PHASE=+' + '{0:.1f}'.format(abs(session_eph_dict['Phase'])))
-    lines.append('PABL=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_longitude'])))
-    lines.append('PABB=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_latitude'])))
-    lines.append('COMMENT=These results from submitter\'s ATLAS-refcat2 based workflow')
-    lines.append('COMMENT=as described in SAS Symposium 2020, using code at github.com/edose/mp2021.')
-    lines.append('COMMENT=This session used ' +
-                 str(len(model.df_used_comps_obs['CompID'].drop_duplicates())) +
-                 ' comp stars. COMPNAME etc lines are omitted.')
-    lines.append('CICORRECTION=TRUE')
-    lines.append('CIBAND=SRI')
-    lines.append('CITARGET=' + '{0:+.3f}'.format(session_dict['mp ri color']) +
-                 '  # origin: ' + session_dict['mp ri color origin'])
-    lines.append('DELIMITER=PIPE')
-    lines.append('ENDMETADATA')
-    data_lines = ['DATA=' + '|'.join(['{0:.6f}'.format(jd), '{0:.3f}'.format(mag), '{0:.3f}'.format(sigma)])
-                  for (jd, mag, sigma) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'])]
-    lines.extend(data_lines)
-    lines.append('ENDDATA')
-
-    # Write the file and exit:
-    fulltext = '\n'.join(lines) + '\n'
-    fullpath = os.path.join(this_directory, 'alcdef_MP_' + mp_string + '_' + an_string + '.txt')
     with open(fullpath, 'w') as f:
         f.write(fulltext)
 
@@ -681,8 +555,8 @@ def _make_session_diagnostic_plots(model, df_model):
     # Inst Mag plot (comps only, one point per obs, x=cat r mag, y=InstMagSigma):
     ax = axes[0, 2]
     make_9_subplot(ax, 'Instrument Magnitude Uncertainty', 'Catalog Mag (r)', 'mMag', '', True,
-                   x_data=df_plot_comp_obs['r'], y_data=df_plot_comp_obs['InstMagSigma'])
-    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=1000.8 * model.df_mp_mags['InstMagSigma'],
+                   x_data=df_plot_comp_obs['r'], y_data=1000.0 * df_plot_comp_obs['InstMagSigma'])
+    ax.scatter(x=model.df_mp_mags['MP_Mags'], y=1000.0 * model.df_mp_mags['InstMagSigma'],
                s=24, alpha=1, color='orange', edgecolors='red', zorder=+100)  # add MP points.
 
     # Cirrus plot (comps only, one point per image, x=JD_fract, y=Image Effect):
@@ -811,6 +685,344 @@ def _make_session_diagnostic_plots(model, df_model):
     # Make df_offsets (one row per obs, at first with only raw offsets):
     make_comp_variability_plots(df_plot_comp_obs, mp_string, an_string, xlabel_jd, sigma,
                                 SESSION_PLOT_FILE_PREFIX)
+
+
+def _write_alcdef_file(mp_string, an_string, defaults_dict, session_dict, site_dict, this_directory, model):
+    """ Write ALCDEF file for one MP photometry (lightcurve) session.
+        Service function called by do_session()--separate invocation not needed.
+        Corrected for ALCDEF format clarifications by Brian Warner, via e-mails of June-July 2021.
+    :return: [none]
+    """
+    mpfile_names = util.all_mpfile_names(defaults_dict['mpfile directory'])
+    name_list = [name for name in mpfile_names if name.startswith('MP_' + mp_string + '_')]
+    if len(name_list) <= 0:
+        print(' >>>>> WARNING: No MPfile can be found for MP', mp_string, '--> NO ALCDEF file written')
+        return
+    if len(name_list) >= 2:
+        print(' >>>>> WARNING: Multiple MPfiles were found for MP', mp_string, '--> NO ALCDEF file written')
+        return
+    mpfile = util.MPfile(name_list[0])
+    df = model.df_mp_mags
+
+    # Build data that will go into file:
+    lines = list()
+
+    lines.append('COMMENT=ALCDEF file for MP ' + mp_string + '  AN ' + an_string + ' (mp2021 workflow)')
+    lines.append('STARTMETADATA')
+    lines.append('REVISEDDATA=FALSE')
+    lines.append('OBJECTNUMBER=' + mp_string)
+    lines.append('OBJECTNAME=' + mpfile.name)
+    lines.append('ALLOWSHARING=TRUE')
+    # lines.append('MPCDESIG=')
+    lines.append('CONTACTNAME=' + ALCDEF_BASE_DATA['contactname'])
+    lines.append('CONTACTINFO=' + ALCDEF_BASE_DATA['contactinfo'])
+    lines.append('OBSERVERS=' + ALCDEF_BASE_DATA['observers'])
+    if site_dict['longitude'] <= 180:
+        alcdef_longitude = site_dict['longitude']
+    else:
+        alcdef_longitude = site_dict['longitude'] - 360.0
+    lines.append('OBSLONGITUDE=' + '{0:.4f}'.format(alcdef_longitude))
+    lines.append('OBSLATITUDE=' + '{0:.4f}'.format(site_dict['latitude']))
+    lines.append('FACILITY=' + site_dict['name'])
+    lines.append('MPCCODE=' + site_dict['mpc code'])
+    # lines.append('PUBLICATION=')
+    jd_session_start = min(df['JD_mid'])
+    jd_session_end = max(df['JD_mid'])
+    jd_session_mid = (jd_session_start + jd_session_end) / 2.0
+    utc_session_mid = datetime_utc_from_jd(jd_session_mid)  # (needed below)
+    dt_split = utc_session_mid.isoformat().split('T')
+    lines.append('SESSIONDATE=' + dt_split[0])
+    lines.append('SESSIONTIME=' + dt_split[1].split('+')[0].split('.')[0])
+    lines.append('FILTER=' + ALCDEF_BASE_DATA['filter'])
+    lines.append('MAGBAND=' + ALCDEF_BASE_DATA['magband'])
+    lines.append('LTCTYPE=NONE')
+    # lines.append('LTCDAYS=0')
+    # lines.append('LTCAPP=NONE')
+    lines.append('REDUCEDMAGS=NONE')
+    session_eph_dict = mpfile.eph_from_utc(utc_session_mid)
+    # earth_mp_au = session_eph_dict['Delta']
+    # sun_mp_au = session_eph_dict['R']
+    # reduced_mag_correction = -5.0 * log10(earth_mp_au * sun_mp_au)
+    #  lines.append('UCORMAG=' + '{0:.4f}'.format(reduced_mag_correction))  # removed to avoid confusion.
+    lines.append('OBJECTRA=' + ra_as_hours(session_eph_dict['RA']).rsplit(':', 1)[0])
+    lines.append('OBJECTDEC=' + ' '.join(dec_as_hex(round(session_eph_dict['Dec'])).split(':')[0:2]))
+    lines.append('EQUINOX=J2000.0')  # instead of EPOCH, per Warner e-mail of 2021-07-02.
+    lines.append('PHASE=+' + '{0:.1f}'.format(abs(session_eph_dict['Phase'])))
+    lines.append('PABL=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_longitude'])))
+    lines.append('PABB=' + '{0:.1f}'.format(abs(session_eph_dict['PAB_latitude'])))
+    lines.append('COMMENT=These results from submitter\'s ATLAS-refcat2 based workflow')
+    lines.append('COMMENT=as described in the authors presentations for SAS Symposium 2020 and 2021,')
+    # (For next line: ALCDEF does not allow web addresses even in comments.)
+    lines.append('COMMENT=using code publicly available at: github website, user=edose, repo=mp2021.')
+    lines.append('COMMENT=This session used ' +
+                 str(len(model.df_used_comps_obs['CompID'].drop_duplicates())) +
+                 ' comp stars. COMPNAME etc lines are omitted.')
+    lines.append('DIFFERMAGS=FALSE')
+    lines.append('STANDARD=TRANSFORMED')
+    lines.append('CICORRECTION=TRUE')
+    lines.append('CIBAND=SRI')
+    lines.append('CITARGET=' + '{0:+.3f}'.format(session_dict['mp ri color']))
+    lines.append('COMMENT=CITARGET is from : ' + session_dict['mp ri color origin'])
+    lines.append('DELIMITER=PIPE')
+    lines.append('ENDMETADATA')
+    data_lines = ['DATA=' + '|'.join(['{0:.6f}'.format(jd), '{0:.3f}'.format(mag), '{0:.3f}'.format(sigma)])
+                  for (jd, mag, sigma) in zip(df['JD_mid'], df['MP_Mags'], df['InstMagSigma'])]
+    lines.extend(data_lines)
+    lines.append('ENDDATA')
+
+    # Write the file and exit:
+    fulltext = '\n'.join(lines) + '\n'
+    fullpath = os.path.join(this_directory, 'alcdef_MP_' + mp_string + '_' + an_string + '.txt')
+    with open(fullpath, 'w') as f:
+        f.write(fulltext)
+
+
+def combine_alcdef_files(mp, apparition_year, top_directory):
+    """ Append into one file: all ALCDEF files in one MP Campaign directory, then write to MP directory.
+        Text-combining function only; does not change any data.
+    :param mp: MP number. A subdirectory 'MP_[mpnumber]' must exist in mp_phot_top_directory. [int or str]
+    :param apparition_year: used to name output file. [string or int]
+    :param top_directory: directory just above the MP_nnnn directory containing alcdef files.
+           Is usually the default, or like 'C:/Astro/MP Photometry/MPBs In Press/For MPB 48-1/'. [string]
+    Before use: Be VERY sure that unused session directories are removed to 'Exclude' subdir.
+    Usage: combine_alcdef_files(1604, 2020) or
+           combine_alcdef_files(1604, 2020, 'C:/Astro/MP Photometry'
+    After use: Verify combined file with ALCDEF Verify web-based checker (on alcdef.org).
+    :return: None. Writes new file to MP's directory.
+    """
+    mpdir = os.path.join(top_directory, 'MP_' + str(mp))
+    an_subdirs = [f.path for f in os.scandir(mpdir)
+                  if (f.is_dir() and f.name.startswith('AN') and len(f.name) == 10)]
+    all_lines = []
+    n_files_read = 0
+    for sd in an_subdirs:
+        filenames = [f.path for f in os.scandir(sd)
+                     if (f.name.startswith('alcdef_MP_') and f.name.endswith('.txt'))]
+        for filename in filenames:
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+            # all_lines.append('COMMENT=################################'
+            #                  '######################################\n')
+            all_lines.extend(lines)
+            print('{0:6d}'.format(len(lines)), 'lines read from', filename)
+            n_files_read += 1
+    if n_files_read <= 0:
+        print(' >>>>> WARNING: No ALCDEF files were found.')
+        exit(0)
+
+    # Write combined ALCDEF file to MP directory:
+    combined_filename = 'alcdef_combined_MP_' + str(mp) + '_' + str(apparition_year) + '.txt'
+    fullpath = os.path.join(mpdir, combined_filename)
+    with open(fullpath, 'w') as f:
+        f.writelines(all_lines)
+    print(str(len(all_lines)), 'total lines from', str(len(an_subdirs)),
+          'files written to top_directory/' + combined_filename + '.')
+
+
+_____SUPPORT_for_do_transform______________________________________________ = 0
+
+
+def do_transform(filter_string: str = 'BB',
+                 target_passband: str = 'SG',
+                 color_index: Tuple[str, str] = ('SG', 'SR'),
+                 fit_order: int = 1,
+                 ri_color_range: Tuple[float, float] = (0, 0.5)):
+    # Setup, about the same as for do_session():
+    context, defaults_dict, session_dict, _ = _session_setup('do_session')
+    this_directory, mp_string, an_string, _ = context
+    # log_filename = defaults_dict['session log filename']
+    # log_file = open(log_filename, mode='a')
+    # mp_int = int(mp_string)  # put this in try/catch block.
+    # mp_string = str(mp_int)
+    # site_dict = ini.make_site_dict(defaults_dict)
+    transform_dict = copy.deepcopy(session_dict)
+
+    # Modify parameters for transform extraction:
+    if isinstance(ri_color_range, tuple) and len(ri_color_range) == 2:
+        transform_dict['min catalog ri color'] = ri_color_range[0]
+        transform_dict['max catalog ri color'] = ri_color_range[1]
+    print(f"Using ri color range = "
+          f"{transform_dict['min catalog ri color']} - "
+          f"{transform_dict['max catalog ri color']}")
+
+    # Make master dataframes:
+    df_comp_master, df_mp_master = \
+        common.make_df_masters(this_directory, defaults_dict,
+                               filters_to_include=filter_string,
+                               require_mp_obs_each_image=False,
+                               data_error_exception_type=SessionDataError)
+    df_model_raw = common.make_df_model_raw(df_comp_master)  # comps only.
+    df_model = common.mark_user_selections(df_model_raw, transform_dict)
+
+    model = TransformModel(df_model, filter_string, target_passband, color_index,
+                           fit_order, transform_dict, df_mp_master, this_directory)
+
+    id_string = f'{filter_string}_{target_passband}_'\
+                f'{color_index[0]}-{color_index[1]}'
+    _write_canopus_file(id_string, an_string, this_directory, model)
+    _make_session_diagnostic_plots(model, df_model)
+
+
+class TransformModel:
+    """ Generates and holds mixed-model regression model, yields transform estimate. """
+    def __init__(self, df_model: pd.DataFrame,
+                 filter_string: str = 'BB',
+                 passband: str = 'SR',
+                 color_index: Tuple[str, str] = ('SR', 'SI'),
+                 fit_order: int = 1,
+                 transform_dict: dict = None,
+                 df_mp_master: pd.DataFrame = None,
+                 this_directory: str = None):
+        self.df_model = df_model
+        self.filter = filter_string
+        self.passband = passband
+        self.color_index = color_index
+        self.fit_order = fit_order
+        self.transform_dict = transform_dict
+        self.df_used_comps_obs = \
+            self.df_model.copy().loc[self.df_model['UseInModel'], :]
+        images_in_used_comps = self.df_used_comps_obs['FITSfile'].drop_duplicates()
+        mp_rows_to_use = df_mp_master['FITSfile'].isin(images_in_used_comps)
+        self.df_used_mp_obs = df_mp_master.loc[mp_rows_to_use, :]
+        self.this_directory = this_directory
+
+        self.dep_var_name = 'InstMag_with_offsets'
+        self.mm_fit = None      # placeholder for the fit result [MixedModelFit object].
+        self.transform = None   # placeholder for this fit parameter result [scalar].
+        self.extinction = None  # "
+        self.vignette = None    # "
+        self.x = None           # "
+        self.y = None           # "
+        self.jd1 = None         # "
+
+        self._prep_and_do_regression()
+        self.df_mp_mags = self._calc_mp_mags()
+
+    def _prep_and_do_regression(self):
+        """ Using MixedModelFit class (which wraps statsmodels.MixedLM.from_formula()).
+            Use ONLY selected comp data in the model itself.
+            Model's .predict() is not really used for transform estimation.
+        :return: [None]
+        """
+        fit_summary_lines = []
+
+        # Handle passband option (from do_transform() parameter):
+        catalog_passband = PASSBAND_NAMES[self.passband]
+        dep_var_offset = self.df_used_comps_obs[catalog_passband].copy()
+        fixed_effect_var_list = []
+
+        # Handle transform (Color Index) option (from do_transform() parameter):
+        if self.color_index == ('SG', 'SR'):
+            ci = 'gr_color'
+        elif self.color_index == ('SR', 'SI'):
+            ci = 'ri_color'
+        else:
+            raise ValueError(f'The given color index of '
+                             f'\'{self.color_index}\' not allowed.')
+
+        # Handle fit order option from do_transform() parameter,
+        # overriding anything in the session.ini file:
+        if self.fit_order not in [1, 2]:
+            raise ValueError(f'Fit order is {self.fit_order} but must be 1 or 2.')
+        self.df_used_comps_obs['CI'] = self.df_used_comps_obs[ci]
+        fixed_effect_var_list.append('CI')
+        if self.fit_order == 2:
+            self.df_used_comps_obs['CI2'] = \
+                [ci ** 2 for ci in self.df_used_comps_obs['CI']]
+            fixed_effect_var_list.append(['CI2'])
+
+        # Handle extinction (ObsAirmass) option (from session.ini file):
+        # Option chosen from: 'yes', ('use', [ext]).
+        extinction_option = self.transform_dict['fit extinction']
+        if extinction_option == 'yes':
+            fixed_effect_var_list.append('ObsAirmass')
+            msg = ' Extinction fit on ObsAirmass data.'
+        elif isinstance(extinction_option, tuple) and len(extinction_option) == 2 and \
+            (extinction_option[0] == 'use'):
+            extinction_offset = float(extinction_option[1]) * \
+                                self.df_used_comps_obs['ObsAirmass']
+            dep_var_offset += extinction_offset
+            msg = ' Extinction (ObsAirmass) not fit: value fixed at default of' + \
+                  ' {0:.3f}'.format(float(extinction_option[1]))
+        else:
+            raise SessionSpecificationError('Invalid \'Fit Extinction\' '
+                                            'option in session.ini')
+
+        # Build all other fixed-effect (x) variable lists and dep-var offsets:
+        if self.transform_dict['fit vignette']:
+            fixed_effect_var_list.append('Vignette')
+        if self.transform_dict['fit xy']:
+            fixed_effect_var_list.extend(['X1024', 'Y1024'])
+        if self.transform_dict['fit jd']:
+            fixed_effect_var_list.append('JD_fract')
+
+        # Build 'random-effect' and dependent (y) variables:
+        random_effect_var_name = 'FITSfile'  # cirrus effect is per-image
+        self.df_used_comps_obs[self.dep_var_name] = \
+            self.df_used_comps_obs['InstMag'] - dep_var_offset
+
+        # Execute regression:
+        import warnings
+        from statsmodels.tools.sm_exceptions import ConvergenceWarning
+        warnings.simplefilter('ignore', ConvergenceWarning)
+        self.mm_fit = MixedModelFit(data=self.df_used_comps_obs,
+                                    dep_var=self.dep_var_name,
+                                    fixed_vars=fixed_effect_var_list,
+                                    group_var=random_effect_var_name)
+        n_comps_used = len(self.df_used_comps_obs['CompID'].drop_duplicates())
+        print(self.mm_fit.statsmodels_object.summary())
+        print('comps =', str(n_comps_used), ' used.')
+        print('sigma =', '{0:.1f}'.format(1000.0 * self.mm_fit.sigma), 'mMag.')
+        print('mean ri color =', '{0:.3f}'
+              .format(self.df_used_comps_obs['ri_color'].mean()))
+        if not self.mm_fit.converged:
+            msg = ' >>>>> WARNING: Regression (mixed-model) DID NOT CONVERGE.'
+            print(msg)
+            fit_summary_lines.append(msg)
+
+        common.write_text_file(self.this_directory, 'fit_summary.txt',
+                               'Regression (mp2021) for: ' + self.this_directory + '\n\n' +
+                               '\n'.join(fit_summary_lines) + '\n\n' +
+                               self.mm_fit.statsmodels_object.summary().as_text() +
+                               '\ncomps = ' + str(n_comps_used) + ' used' +
+                               '\nsigma = ' + '{0:.1f}'.format(1000.0 * self.mm_fit.sigma) + ' mMag.')
+
+    def _calc_mp_mags(self):
+        """ Use model and MP instrument magnitudes to get best estimates of MP absolute magnitudes."""
+        bogus_cat_mag = 0.0  # we'll need this below, to correct raw predictions.
+        self.df_used_mp_obs = \
+            self.df_used_mp_obs.copy(deep=True)  # shut up pandas & its fake warnings.
+        self.df_used_mp_obs['CatMag'] = \
+            bogus_cat_mag  # totally bogus local value, corrected for later.
+        best_mp_ri_color = self.transform_dict['mp ri color']
+        self.df_used_mp_obs['CI'] = best_mp_ri_color
+        self.df_used_mp_obs['CI2'] = best_mp_ri_color ** 2
+        raw_predictions = self.mm_fit.predict(self.df_used_mp_obs,
+                                              include_random_effect=True)
+        dep_var_offset = pd.Series(len(self.df_used_mp_obs) * [0.0],
+                                   index=raw_predictions.index)
+
+        # No handling needed for transform (is always a term in this regression).
+
+        # Handle extinction offsets for MPs:
+        extinction_option = self.transform_dict['fit extinction']
+        if isinstance(extinction_option, tuple):
+            extinction_offset = float(extinction_option[1]) * \
+                                self.df_used_mp_obs['ObsAirmass']
+            dep_var_offset += extinction_offset
+
+        # Calculate best MP magnitudes, incl. effect of assumed bogus_cat_mag:
+        mp_mags = self.df_used_mp_obs['InstMag'] - dep_var_offset - \
+            raw_predictions + bogus_cat_mag
+        df_mp_mags = pd.DataFrame(data={'MP_Mags': mp_mags}, index=list(mp_mags.index))
+        df_mp_mags = \
+            pd.merge(left=df_mp_mags,
+                     right=self.df_used_mp_obs.loc[:, ['JD_mid', 'FITSfile',
+                                                       'InstMag', 'InstMagSigma']],
+                     how='left', left_index=True, right_index=True, sort=False)
+        return df_mp_mags
+
+
 
 
 _____SUPPORT_for_PLOTTING___________________________________________________ = 0
@@ -1013,7 +1225,6 @@ def draw_x_line(ax, x_value, color='lightgray'):
     ax.axvline(x=x_value, color=color, linewidth=1, zorder=-100)
 
 
-
 _____SUPPORT_FUNCTIONS_and_CLASSES________________________________________ = 0
 
 
@@ -1091,7 +1302,7 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'Omit Obs = ',
         '# One image only per line, with or without .fts:',
         'Omit Images = ',
-        'Min Catalog r mag = 12',
+        'Min Catalog r mag = 11.5',
         'Max Catalog r mag = 16',
         'Max Catalog dr mmag = 16',
         'Max Catalog di mmag = 16',
@@ -1103,9 +1314,10 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'MP ri color = +0.220',
         'MP ri color origin = Default MP color',
         '# Fit Transform, one of: Fit=1, Fit=2, Use [val1], Use [val1] [val2]:',
-        'Fit Transform = Use +0.4 -0.6',
+        '# Clear:\'Use +0.39 -0.71\'    BB:\'Use -0.121\'',
+        'Fit Transform = Use -0.135',
         '# Fit Extinction, one of: Yes, Use [val]:',
-        'Fit Extinction = Use +0.16',
+        'Fit Extinction = Use +0.13',
         'Fit Vignette = Yes',
         'Fit XY = No',
         'Fit JD = No']
@@ -1132,3 +1344,48 @@ def _session_setup(calling_function_name='[FUNCTION NAME NOT GIVEN]'):
     log_file.write('\n===== ' + calling_function_name + '()  ' +
                    '{:%Y-%m-%d  %H:%M:%S utc}'.format(datetime.now(timezone.utc)) + '\n')
     return context, defaults_dict, session_dict, log_file
+
+
+# def update_alcdef_files(mp):
+#     """ Updates ALCDEF txt file for each AN directory in MP directory.
+#         To produce updates of July 2021, for ALCDEF requirements.
+#     """
+#     # Make list of AN directories:
+#     mp_dir = 'C:/Astro/MP Photometry/For MPB 48-4 July 15/MP_' + str(mp)
+#     dir_list = []
+#     for file in os.listdir(mp_dir):
+#         d = os.path.join(mp_dir, file)
+#         if os.path.isdir(d):
+#             if (d[-10:])[:5] == 'AN202':  # must be a bona fide AN subdir.
+#                 dir_list.append(d)
+#                 # print(' >>>>>' + d + '<')
+#
+#     # For each AN directory: read ALCDEF file, update it, write it back out:
+#     for d in dir_list:
+#         an_str = d[-8:]
+#         fullpath = os.path.join(d, 'alcdef_MP_' + str(mp) + '_' + an_str + '.txt')
+#         print('>' + fullpath + '<')
+#         with open(fullpath, mode='r') as f:
+#             lines = f.readlines()
+#
+#         # 1. Insert DIFFERMAGS= and STANDARD= lines:
+#         line_num = min([n for (n, line) in enumerate(lines) if line.startswith('CICORRECTION=')])
+#         lines[line_num:line_num] = ['DIFFERMAGS=FALSE\n', 'STANDARD=TRANSFORMED\n']
+#
+#         # 2. Replace 3 COMMENT= lines with new COMMENT= lines:
+#         line_num = min([n for (n, line) in enumerate(lines) if line.startswith('COMMENT=')])
+#         lines[line_num:line_num + 3] = [
+#             'COMMENT=These results from submitter\'s ATLAS-refcat2 based workflow\n',
+#             'COMMENT=as described in the author\'s presentations for SAS Symposium 2020 and 2021,\n',
+#             'COMMENT=using code publicly available at: github website, user=edose, repo=mp2021.\n',
+#             'COMMENT=This session used 25 comp stars. COMPNAME etc lines are omitted.\n']
+#
+#         # 3. Add Comment (hashed/ignore) line:
+#         lines[1:1] = ['# As modified 2021-07-15, using update_alcdef_files().\n']
+#
+#         # 4. Insert new EQUINOX= line:
+#         line_num = min([n for (n, line) in enumerate(lines) if line.startswith('OBJECTDEC=')])
+#         lines[line_num+1:line_num+1] = ['EQUINOX=J2000.0\n']
+#
+#         with open(fullpath, mode='w') as f:
+#             f.writelines(lines)

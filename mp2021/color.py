@@ -19,7 +19,7 @@ from astropak.stats import MixedModelFit
 import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
-from mp2021.session import make_qq_plot_fullpage, make_9_subplot, draw_x_line
+from mp2021.session import make_qq_plot_fullpage, make_9_subplot, draw_x_line, make_comp_variability_plots
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
@@ -702,6 +702,18 @@ def _make_color_diagnostic_plots(df_model, color_model_1, color_model_2):
     plt.show()
     fig.savefig(COLOR_PLOT_FILE_PREFIX + '4_Residuals.png')
 
+    # ################ FIGURE(S) 5: Variability plots:
+    # Several comps on a subplot, vs JD, normalized by (minus) the mean of all other comps' responses.
+    # Make df_offsets (one row per obs, at first with only raw offsets):
+    # TODO: make df_plot_comp_obs_filter_corrected from df_plot_comp_obs,
+    #       using corrections for (1) color as determined, and (2) transforms as given.
+    df_plot_comp_obs_filter_corrected = df_plot_comp_obs.copy()
+    # TODO: Make corrections here.
+    iiii = 4
+
+    make_comp_variability_plots(df_plot_comp_obs_filter_corrected, mp_string, an_string, xlabel_jd, sigma,
+                                COLOR_PLOT_FILE_PREFIX)
+
 
 __________SUPPORT_FUNCTIONS_and_CLASSES_________________________ = 0
 
@@ -864,6 +876,37 @@ def test_do_color_with_comps():
         do_color(requested_comp_id=comp_id)
 
 
+def get_df_from_sloan_moc(top_mp_number=5000):
+    """ Read and parse SDSS MOC file, produce relatively small pandas DataFrame.
+    :param top_mp_number: highest asteroid number to include. [int]
+    :return: dataframe of results including mags and color.
+    """
+    fullpath = 'D:/Astro/Catalogs/SDSS MOC/gbo.sdss-moc.phot/data/sdssmocadr4.tab'
+    if os.path.exists(fullpath):
+        with open(fullpath, 'r') as f:
+            lines = f.readlines()
+    else:
+        print(' >>>>> Cannot find SDSS MOC at:', fullpath)
+        return
+    dict_list = []
+    for line in lines:
+        if line[249:251] != ' 0':
+            if line[242:243] == '1':
+                mp_number = int(line[244:251])
+                if mp_number <= top_mp_number:
+                    # Put this catalog line in the dataframe:
+                    g = float(line[174:179])  # magnitude
+                    r = float(line[185:190])  # "
+                    i = float(line[196:201])  # "
+                    sgr = g - r  # color
+                    sri = r - i  # "
+                    line_dict = {'MP': mp_number, 'SG': g, 'SR': r, 'SI': i, 'SGR': sgr, 'SRI': sri}
+                    dict_list.append(line_dict)
+    df = pd.DataFrame(data=dict_list)
+    if len(df) >= 1:
+        df.index = list(df['MP'])
+    return df
+
 
 def _replace_mp_with_requested_comp(df_comp_master, comp_id, n_required_comp_obs, color_dict):
     """ Make all the new data needed to substitute a comp star (with known color) for a minor planet.
@@ -893,7 +936,6 @@ def _replace_mp_with_requested_comp(df_comp_master, comp_id, n_required_comp_obs
     new_color_dict['mp xy'] = new_xy_list
 
     return new_df, new_color_dict
-
 
 
 # def make_test_df_untransformed():
