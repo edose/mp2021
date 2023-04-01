@@ -26,18 +26,21 @@ from scipy.stats import norm
 import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
-# from mp2021.common import do_fits_assessments, make_df_images, make_df_comps, make_comp_apertures, \
-#     make_df_comp_obs, make_mp_apertures, make_fits_objects, get_refcat2_comp_stars,
+# from mp2021.common import do_fits_assessments, make_df_images, make_df_comps,
+#     make_comp_apertures, make_df_comp_obs, make_mp_apertures,
+#     make_fits_objects, get_refcat2_comp_stars,
 #     initial_screen_comps, \
 #     make_df_mp_obs, write_df_images_csv, write_df_comps_csv, write_df_comp_obs_csv, \
-#     write_df_mp_obs_csv, write_text_file, validate_mp_xy, add_obsairmass_df_comp_obs, \
+#     write_df_mp_obs_csv, write_text_file, validate_mp_xy,
+#     add_obsairmass_df_comp_obs, \
 #     add_obsairmass_df_mp_obs, add_ri_color_df_comps, make_df_masters
 
 from astropak.util import datetime_utc_from_jd, ra_as_hours, dec_as_hex
 from astropak.stats import MixedModelFit
 
 
-THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname\
+    (os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 
 MINIMUM_COMP_OBS_COUNT = 5
@@ -60,11 +63,13 @@ class SessionLogFileError(Exception):
 
 
 class SessionDataError(Exception):
-    """ Raised on any fatal problem with data, esp. with contents of FITS files or missing data."""
+    """ Raised on any fatal problem with data,
+        esp. with contents of FITS files or missing data."""
 
 
 class SessionSpecificationError(Exception):
-    """ Raised on any fatal problem in specifying the session or processing, esp. in _make_df_all(). """
+    """ Raised on any fatal problem in specifying the session or
+        processing, esp. in _make_df_all(). """
 
 
 def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
@@ -72,12 +77,14 @@ def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
     """ Launch one session of MP photometry workflow.
         Adapted from package mp_phot, workflow_session.py.start().
         Example usage: session.start('C:/Astro/MP Photometry/', 1111, 20200617, 'Clear')
-    :param session_top_directory: path of lowest directory common to all MP lightcurve FITS, e.g.,
-               'C:/Astro/MP Photometry'. None will use .ini file default (normal case). [string]
-    :param mp_id: either a MP number, e.g., 1602 for Indiana [integer or string], or for an id string
-               for unnumbered MPs only, e.g., ''. [string only]
-    :param an_date: Astronight date representation, e.g., '20191106'. [integer or string]
-    :param filter: name of filter for this session, or None to use default from instrument file. [string]
+    :param session_top_directory: path of lowest directory common to
+        all MP lightcurve FITS, e.g., 'C:/Astro/MP Photometry'.
+        None will use .ini file default (normal case). [string]
+    :param mp_id: either a MP number, e.g., 1602 for Indiana [integer or string],
+        or for an id string for unnumbered MPs only, e.g., ''. [string only]
+    :param an_date: Astronight date representation, e.g., '20191106'. [int or string]
+    :param filter: name of filter for this session, or
+        None to use default from instrument file. [string]
     :return: [None]
     """
     defaults_dict = ini.make_defaults_dict()
@@ -90,7 +97,8 @@ def start(session_top_directory=None, mp_id=None, an_date=None, filter=None):
     an_string = util.parse_an_date(an_date)
 
     # Construct directory path, and make it the working directory:
-    mp_directory = os.path.join(session_top_directory, 'MP_' + mp_string, 'AN' + an_string)
+    mp_directory = os.path.join(session_top_directory, 'MP_' + mp_string,
+                                'AN' + an_string)
     os.chdir(mp_directory)
     print('Working directory set to:', mp_directory)
 
@@ -167,15 +175,18 @@ def assess(return_results=False):
             print('\n >>>>> ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.')
             print('Next: (1) enter MP pixel positions in', session_ini_filename,
                   'AND SAVE it,\n      (2) make_dfs()')
-            log_file.write('assess(): ALL ' + str(len(df)) + ' FITS FILES APPEAR OK.' + '\n')
+            log_file.write('assess(): ALL ' + str(len(df)) +
+                           ' FITS FILES APPEAR OK.' + '\n')
         else:
-            print('\n >>>>> ' + str(return_dict['warning count']) + ' warnings (see listing above).')
+            print('\n >>>>> ' + str(return_dict['warning count']) +
+                  ' warnings (see listing above).')
             print('        Correct these and rerun assess() until no warnings remain.')
-            log_file.write('assess(): ' + str(return_dict['warning count']) + ' warnings.' + '\n')
+            log_file.write('assess(): ' + str(return_dict['warning count']) +
+                           ' warnings.' + '\n')
 
     df_temporal = df.loc[:, ['Filename', 'JD_mid']].sort_values(by=['JD_mid'])
     filenames_temporal_order = df_temporal['Filename']
-    _write_session_ini_stub(this_directory, filenames_temporal_order)  # if it doesn't already exist.
+    _write_session_ini_stub(this_directory, filenames_temporal_order)
     if return_results:
         return return_dict
 
@@ -183,7 +194,7 @@ def assess(return_results=False):
 def make_dfs(print_ap_details=False):
     """ Perform aperture photometry for one session of lightcurve photometry only.
         For color index determination, see color.make_dfs().
-        :param print_ap_details: True if user wants aperture details for each MP. [boolean]
+        :param print_ap_details: True if user wants aperture details for each MP. [bool]
         """
     context, defaults_dict, session_dict, log_file = _session_setup('make_dfs')
     this_directory, mp_string, an_string, filter_string = context
@@ -194,16 +205,21 @@ def make_dfs(print_ap_details=False):
 
     fits_filenames = util.get_mp_filenames(this_directory)
     if not fits_filenames:
-        raise SessionDataError('No FITS files found in session directory ' + this_directory)
+        raise SessionDataError(f'No FITS files found in '
+                               f'session directory {this_directory}')
 
     # Quick validation of MP XY filenames & values:
-    mp_xy_files_found, mp_xy_values_ok = common.validate_mp_xy(fits_filenames, session_dict)
+    mp_xy_files_found, mp_xy_values_ok = \
+        common.validate_mp_xy(fits_filenames, session_dict)
     if not mp_xy_files_found:
-        raise SessionIniFileError('At least 1 MP XY file not found in session directory ' + this_directory)
+        raise SessionIniFileError(f'At least 1 MP XY file not found in '
+                                  f'session directory {this_directory}')
     if not mp_xy_values_ok:
-        raise SessionIniFileError('MP XY invalid -- did you enter values and save session.ini?')
+        raise SessionIniFileError('MP XY invalid -- did you enter values '
+                                  'and save session.ini?')
 
-    fits_objects, fits_object_dict = common.make_fits_objects(this_directory, fits_filenames)
+    fits_objects, fits_object_dict = \
+        common.make_fits_objects(this_directory, fits_filenames)
     df_images = common.make_df_images(fits_objects)
 
     # Get and screen catalog entries for comp stars:
@@ -214,18 +230,22 @@ def make_dfs(print_ap_details=False):
 
     # Make comp-star apertures, comps dataframe, and comp obs dataframe:
     df_comps = common.make_df_comps(refcat2)
-    comp_apertures_dict = common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap,
-                                                     background_width)
-    df_comp_obs = common.make_df_comp_obs(comp_apertures_dict, df_comps, instrument, df_images)
+    comp_apertures_dict = \
+        common.make_comp_apertures(fits_objects, df_comps, disc_radius, gap,
+                                   background_width)
+    df_comp_obs = common.make_df_comp_obs(comp_apertures_dict, df_comps,
+                                          instrument, df_images)
 
     # Make MP apertures and MP obs dataframe:
     starting_mp_obs_id = max(df_comp_obs['ObsID'].astype(int)) + 1
-    mp_apertures_dict, mp_mid_radec_dict = common.make_mp_apertures(fits_object_dict, mp_string,
-                                                                    session_dict, disc_radius,
-                                                                    gap, background_width, log_file,
-                                                                    starting_obs_id=starting_mp_obs_id,
-                                                                    print_ap_details=print_ap_details)
-    df_mp_obs = common.make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict, instrument, df_images)
+    mp_apertures_dict, mp_mid_radec_dict = \
+        common.make_mp_apertures(fits_object_dict, mp_string,
+                                 session_dict, disc_radius,
+                                 gap, background_width, log_file,
+                                 starting_obs_id=starting_mp_obs_id,
+                                 print_ap_details=print_ap_details)
+    df_mp_obs = common.make_df_mp_obs(mp_apertures_dict, mp_mid_radec_dict,
+                                      instrument, df_images)
 
     # Post-process dataframes:
     _remove_images_without_mp_obs(fits_object_dict, df_images, df_comp_obs, df_mp_obs)

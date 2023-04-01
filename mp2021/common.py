@@ -525,8 +525,11 @@ def initial_screen_comps(refcat2):
     info.append('Refcat2: max(dr) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.select_max_i_uncert(INITIAL_MAX_DI_MMAG)
     info.append('Refcat2: max(di) screened to ' + str(len(refcat2.df_selected)) + ' stars.')
-    refcat2.select_sloan_ri_color(INITIAL_MIN_RI_COLOR, INITIAL_MAX_RI_COLOR)
-    info.append('Refcat2: Sloan ri color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
+    # TODO: Reactivate ri-color screening, eventually.
+    info.append('Refcat2: ***** Sloan ri color NOT INITIALLY SCREENED, '
+                'for transform FOV search.')
+    # refcat2.select_sloan_ri_color(INITIAL_MIN_RI_COLOR, INITIAL_MAX_RI_COLOR)
+    # info.append('Refcat2: Sloan ri color screened to ' + str(len(refcat2.df_selected)) + ' stars.')
     refcat2.remove_overlapping()
     info.append('Refcat2: overlaps removed to ' + str(len(refcat2.df_selected)) + ' stars.')
     return info
@@ -698,5 +701,5 @@ def mark_user_selections(df_model, session_dict):
     return df_model
 
 
-TRANSFORM_COLUMN_LOOKUP = {('SG', 'SR'): 'gr_color', ('SR', 'SI'): 'ri_color'}
-CATMAG_PASSBAND_COLUMN_LOOKUP = {'SG': 'g', 'SR': 'r', 'SI': 'i'}
+COLOR_COLUMN_LOOKUP = {('SG', 'SR'): 'gr_color', ('SR', 'SI'): 'ri_color'}
+PASSBAND_COLUMN_LOOKUP = {'SG': 'g', 'SR': 'r', 'SI': 'i'}

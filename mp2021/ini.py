@@ -1,6 +1,6 @@
-__author__ = "Eric Dose, Albuquerque"
-
 """ This module: manages INI files for other modules. """
+
+__author__ = "Eric Dose, Albuquerque"
 
 # Python core:
 import os
@@ -13,7 +13,8 @@ from collections import OrderedDict
 import astropak.ini
 
 
-THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+THIS_PACKAGE_ROOT_DIRECTORY = \
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI_DIRECTORY = os.path.join(THIS_PACKAGE_ROOT_DIRECTORY, 'ini')
 DEFAULTS_INI_FILENAME = 'defaults.ini'
 
@@ -64,7 +65,9 @@ def make_instrument_dict(defaults_dict):
                 try:
                     mag, exp = float(items[0]), float(items[1])
                 except ValueError as e:
-                    raise ValueError(' '.join([str(e), 'in mag exposures line:', line])) from None
+                    raise ValueError(' '.join([str(e),
+                                               'in mag exposures line:', line]))\
+                        from None
                 mag_exposure_list.append((mag, exp))
         mag_exposure_dict[filter_name] = tuple(mag_exposure_list)
     instrument_dict['mag exposures'] = mag_exposure_dict
@@ -84,9 +87,11 @@ def make_instrument_dict(defaults_dict):
         transform_dict[key] = values
     instrument_dict['transforms'] = transform_dict
 
-    # Parse and overwrite 'available filters', 'default color filters', 'default color index':
-    instrument_dict['available filters'] = tuple(instrument_dict['available filters'].split())
-    instrument_dict['default color filters'] = tuple(instrument_dict['default color filters'].split())
+    # Parse and overwrite 3 more:
+    instrument_dict['available filters'] = \
+        tuple(instrument_dict['available filters'].split())
+    instrument_dict['default color filters'] = \
+        tuple(instrument_dict['default color filters'].split())
     instrument_dict['default color index'] = \
         tuple([s.strip() for s in instrument_dict['default color index'].split('-')])
     return instrument_dict
@@ -147,7 +152,8 @@ def make_session_dict(defaults_dict, session_directory):
         'min catalog ri color': 0.10,
         'max catalog ri color': 0.34,
         'mp ri color': +0.22,
-        'fit transform': ('use', '+0.4', '-0.16'), or ('use', '+0.4'), ('fit', '1'), ('fit', '2').
+        'fit transform': ('use', '+0.4', '-0.16'), or
+            ('use', '+0.4'), ('fit', '1'), ('fit', '2').
         'fit extinction': (use', '+0.16'), or 'yes' to fit extinction.
         'fit vignette': True,
         'fit xy': False,
@@ -156,15 +162,16 @@ def make_session_dict(defaults_dict, session_directory):
     session_ini_filename = defaults_dict['session control filename']
     fullpath = os.path.join(session_directory, session_ini_filename)
     session_ini = astropak.ini.IniFile(fullpath, template_directory_path=INI_DIRECTORY)
-    session_dict = session_ini.value_dict  # raw values, a few to be reparsed just below:
+    session_dict = session_ini.value_dict  # raw values, a few to reparse just below:
 
-    # ########## package mp2021 will have NO Ref Stars, as they are not needed until Bulldozer.
+    # ### package mp2021 will have NO Ref Stars, as they are not needed until Bulldozer.
     # # Bulldozer section:
     # # Parse and overwrite 'ref star xy':
     # ref_star_xy_list = []
     # ref_star_xy_lines = [line.strip() for line in control_dict['ref star xy']]
     # for line in ref_star_xy_lines:
-    #     items = line.replace(',', ' ').rsplit(maxsplit=2)  # for each line, items are: filename x y
+    #     items = line.replace(',', ' ').rsplit(maxsplit=2)
+    # for each line, items are: filename x y
     #     if len(items) == 3:
     #         filename = items[0]
     #         x = ini.float_or_warn(items[1], filename + 'Ref Star X' + items[1])
@@ -174,7 +181,8 @@ def make_session_dict(defaults_dict, session_directory):
     #         print(' >>>>> ERROR: ' + items[1] + ' Ref Star XY invalid: ' + line)
     #         return None
     # if len(ref_star_xy_list) < 2:
-    #     print(' >>>>> ERROR: control \'ref star xy\' has fewer than 2 entries, not allowed.')
+    #     print(' >>>>> ERROR: control \'ref star xy\' has fewer than 2 entries,
+    #     not allowed.')
     # control_dict['ref star xy'] = ref_star_xy_list
 
     # Parse and overwrite 'mp xy':
@@ -190,10 +198,10 @@ def make_session_dict(defaults_dict, session_directory):
     except ValueError:
         raise ValueError('Session ini: MP ri Color is not a float: ' +
                          session_dict['mp ri color']) from None
-    session_dict['fit transform'] = tuple([item.lower()
-                                           for item in session_dict['fit transform'].split()])
-    session_dict['fit extinction'] = tuple([item.lower()
-                                            for item in session_dict['fit extinction'].split()])
+    session_dict['fit transform'] = \
+        tuple([item.lower() for item in session_dict['fit transform'].split()])
+    session_dict['fit extinction'] = \
+        tuple([item.lower() for item in session_dict['fit extinction'].split()])
     if len(session_dict['fit extinction']) == 1:
         session_dict['fit extinction'] = session_dict['fit extinction'][0]
     return session_dict
@@ -262,9 +270,9 @@ def make_color_dict(defaults_dict, color_directory):
     return color_dict
 
 
-def make_color_def_dict(defaults_dict):
-    """ Read the color definition .ini file for this color subdirectory, return color def dict.
-    :param color_dict:
+def make_color_def_dict(color_def_fullpath: str) -> dict:
+    """ Read the color definition .ini file for this color subdirectory as dictionary.
+    :param color_def_fullpath: Location of color definition file. [str]
     :return: color_def_dict. [py dict]
     Structure of color_def_dict:
       { 'target colors': [('SG', 'SR'), ('SR', 'SI)], (for target colors SG-SR, SR-SI)
@@ -279,10 +287,8 @@ def make_color_def_dict(defaults_dict):
                           'transform ci': 'SR', 'SI')}
       }
     """
-    color_def_filename = defaults_dict['color definition filename']
-    color_def_fullpath = os.path.join(INI_DIRECTORY, 'color', color_def_filename)
     if not (os.path.exists(color_def_fullpath) and os.path.isfile(color_def_fullpath)):
-        raise ColorDefinitionError('Requested file not found: ' + color_def_fullpath)
+        raise ColorDefinitionError(f'Requested file not found: {color_def_fullpath}')
     ini_config = configparser.ConfigParser()
     ini_config.read(color_def_fullpath)
     color_def_dict = OrderedDict()
@@ -293,35 +299,40 @@ def make_color_def_dict(defaults_dict):
     color_def_dict['reference filter'] = ini_config.get('Reference', 'Filter')
     color_def_dict['reference passband'] = ini_config.get('Reference', 'Passband')
 
-    filter_sections = [fs for fs in ini_config.sections() if fs.lower().startswith('filter')]
+    filter_sections = [fs for fs in ini_config.sections()
+                       if fs.lower().startswith('filter')]
     filters = [fs[6:].strip() for fs in filter_sections]
     filters_dict = OrderedDict()
     for f, fs in zip(filters, filter_sections):
         filters_dict[f] = {'name': ini_config.get(fs, 'Name'),
                            'target passband': ini_config.get(fs, 'Target Passband'),
-                           'transform ci': tuple(ini_config.get(fs, 'Transform CI').split('-'))}
+                           'transform ci': tuple(ini_config.get(fs, 'Transform CI')
+                                                 .split('-'))}
     color_def_dict['filters'] = filters_dict
 
     # Verify: reference filter and passband match in exactly one Filter section.
-    n_filter_matches = sum([1 if f == color_def_dict['reference filter'] else 0 for f in filters_dict])
+    n_filter_matches = sum([1 if f == color_def_dict['reference filter'] else 0
+                            for f in filters_dict])
     if n_filter_matches != 1:
-        raise ColorDefinitionError('Reference filter ' + color_def_dict['reference filter'] +
-                                   ' must be present in exactly one Filter section, but is in ' +
-                                   str(n_filter_matches))
+        raise ColorDefinitionError('Reference filter ' +
+                                   color_def_dict['reference filter'] +
+                                   ' must be present in exactly one Filter section, '
+                                   'but is in ' + str(n_filter_matches))
     n_passband_matches = sum([1 if filters_dict[f]['target passband'] ==
-                                   color_def_dict['reference passband']
+                              color_def_dict['reference passband']
                               else 0 for f in filters_dict])
     if n_passband_matches != 1:
-        raise ColorDefinitionError('Reference passband ' + color_def_dict['reference passband'] +
-                                   ' must be present in exactly one Filter section, but is in ' +
-                                   str(n_passband_matches))
+        raise ColorDefinitionError('Reference passband ' +
+                                   color_def_dict['reference passband'] +
+                                   ' must be present in exactly one Filter section, '
+                                   'but is in ' + str(n_passband_matches))
 
     # Verify: target colors eactly equals *set of* Transform CI colors.
     target_color_set = set(color_def_dict['target_colors'])
     transform_ci_set = set([filters_dict[f]['transform ci'] for f in filters_dict])
     if target_color_set != transform_ci_set:
-        raise ColorDefinitionError('Target Colors must equal set of transform CI colors, but do not.')
-
+        raise ColorDefinitionError('Target Colors must equal set of transform '
+                                   'CI colors, but do not.')
     return color_def_dict
 
 
@@ -329,7 +340,8 @@ _____INI_UTILITIES______________________________________ = 0
 
 
 def _extract_mp_xy_positions(control_dict, control_type):
-    """ From session or color control dict, extract and return MP x,y positions given for 2 FITS files.
+    """ From session or color control dict, extract and return MP x,y positions
+        given for 2 FITS files.
     :param control_dict: session or color control dict. [py dict]
     :param control_type: 'Session' or 'Color', as appropriate. [string]
     :return:
@@ -338,7 +350,8 @@ def _extract_mp_xy_positions(control_dict, control_type):
     mp_xy_list = []
     mp_xy_lines = [line.strip() for line in control_dict['mp xy']]
     for line in mp_xy_lines:
-        items = line.replace(',', ' ').rsplit(maxsplit=2)  # for each line, items are: filename x y
+        # For each line, items are: filename x y
+        items = line.replace(',', ' ').rsplit(maxsplit=2)
         if len(items) != 3:
             raise IniParseError(control_string + ' ini: MP x,y line: ' + line)
         filename = items[0]
@@ -348,43 +361,51 @@ def _extract_mp_xy_positions(control_dict, control_type):
             raise ValueError(control_string + ' ini: MP x or y is not a float.')
         mp_xy_list.append((filename, x, y))
     if len(mp_xy_list) != 2:
-        raise IniParseError(control_string + ' ini: MP x,y lines must number exactly 2.')
+        raise IniParseError(f'{control_string} ini: '
+                            f'MP x,y lines must number exactly 2.')
     return mp_xy_list
 
 
 def _extract_omit_comps_obs_images(control_dict, control_type):
-    """ From session or color control dict, extract identifiers for comp stars, observations, and
-        images to omit from regression, return an updated copy of the control_dict.
+    """ From session or color control dict, extract identifiers for comp stars,
+        observations, and images to omit from regression,
+        return an updated copy of the control_dict.
     :param control_dict: session or color control dict. [py dict]
     :param control_type: 'Session' or 'Color', as appropriate. [string]
     :return:
     """
     control_string = control_type.strip().title()
-    control_dict['omit comps'] = _multiline_ini_value_to_items(' '.join(control_dict['omit comps']))
-    control_dict['omit obs'] = _multiline_ini_value_to_items(' '.join(control_dict['omit obs']))
+    control_dict['omit comps'] = \
+        _multiline_ini_value_to_items(' '.join(control_dict['omit comps']))
+    control_dict['omit obs'] = \
+        _multiline_ini_value_to_items(' '.join(control_dict['omit obs']))
     control_dict['omit images'] = [s.strip() for s in control_dict['omit images']]
     try:
         omit_comps_as_ints = [int(comp) for comp in control_dict['omit comps']]
     except ValueError:
-        error_string = control_string + ' ini: at least one Omit Comps entry is not an integer.'
+        error_string = control_string + ' ini: at least one Omit Comps ' \
+                                        'entry is not an integer.'
         raise ValueError(error_string) from None
     if any([(i < 1) for i in omit_comps_as_ints]):
-        error_string = control_string + ' ini: at least one Omit Comps entry is not a positive integer.'
+        error_string = control_string + ' ini: at least one Omit Comps ' \
+                                        'entry is not a positive integer.'
         raise IniParseError(error_string) from None
     try:
         omit_obs_as_ints = [int(obs) for obs in control_dict['omit obs']]
     except ValueError:
-        error_string = control_string + ' ini: at least one Omit Obs entry is not an integer.'
+        error_string = control_string + ' ini: at least one Omit Obs ' \
+                                        'entry is not an integer.'
         raise ValueError(error_string) from None
     if any([(i < 1) for i in omit_obs_as_ints]):
-        error_string = control_string + ' ini: at least one Omit Obs entry is not a positive integer.'
+        error_string = control_string + ' ini: at least one Omit Obs ' \
+                                        'entry is not a positive integer.'
         raise IniParseError(error_string) from None
     return control_dict
 
 
 def _multiline_ini_value_to_lines(value):
     lines = list(filter(None, (x.strip() for x in value.splitlines())))
-    lines = [line.replace(',', ' ').strip() for line in lines]  # replace commas with spaces
+    lines = [line.replace(',', ' ').strip() for line in lines]  # commas become spaces
     return lines
 
 
