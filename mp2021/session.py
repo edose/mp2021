@@ -37,6 +37,7 @@ import mp2021.common as common
 
 from astropak.util import datetime_utc_from_jd, ra_as_hours, dec_as_hex
 from astropak.stats import MixedModelFit
+from astropak.catalogs import Refcat2
 
 
 THIS_PACKAGE_ROOT_DIRECTORY = os.path.dirname\
@@ -337,14 +338,15 @@ class SessionModel:
         self.this_directory = this_directory
 
         self.dep_var_name = 'InstMag_with_offsets'
-        self.mm_fit = None      # placeholder for the fit result [MixedModelFit object].
-        self.transform = None   # placeholder for this fit parameter result [scalar].
-        self.transform_fixed = None  # "
-        self.extinction = None  # "
-        self.vignette = None    # "
-        self.x = None           # "
-        self.y = None           # "
-        self.jd1 = None         # "
+        self.mm_fit = None        # placeholder for fit result [MixedModelFit object].
+        self.mean_instmag = None  # placeholder
+        # self.transform = None   # placeholder for this fit parameter result [scalar].
+        # self.transform_fixed = None  # "
+        # self.extinction = None  # "
+        # self.vignette = None    # "
+        # self.x = None           # "
+        # self.y = None           # "
+        # self.jd1 = None         # "
 
         self._prep_and_do_regression()
         self.df_mp_mags = self._calc_mp_mags()
@@ -402,6 +404,19 @@ class SessionModel:
         else:
             raise SessionSpecificationError('Invalid \'Fit Extinction\' option in session.ini')
 
+        # Handle InstMag slope option:
+        instmag_slope_option = self.session_dict['fit instmag slope']
+        if instmag_slope_option == True:
+            self.mean_instmag = self.df_used_comps_obs['InstMag'].mean()
+            self.df_used_comps_obs['InstMagSlope'] = \
+                [im - self.mean_instmag for im in self.df_used_comps_obs['InstMag']]
+            fixed_effect_var_list.append('InstMagSlope')
+        elif instmag_slope_option == False:
+            pass
+        else:
+            raise SessionSpecificationError(
+                'Invalid \'Fit InstMag Slope\' option in session.ini')
+
         # Build all other fixed-effect (x) variable lists and dep-var offsets:
         if self.session_dict['fit vignette']:
             fixed_effect_var_list.append('Vignette')
@@ -449,6 +464,8 @@ class SessionModel:
         best_mp_ri_color = self.session_dict['mp ri color']
         self.df_used_mp_obs['CI'] = best_mp_ri_color
         self.df_used_mp_obs['CI2'] = best_mp_ri_color ** 2
+        self.df_used_mp_obs['InstMagSlope'] = \
+            [im - self.mean_instmag for im in self.df_used_mp_obs['InstMag']]
         raw_predictions = self.mm_fit.predict(self.df_used_mp_obs, include_random_effect=True)
         dep_var_offset = pd.Series(len(self.df_used_mp_obs) * [0.0], index=raw_predictions.index)
 
@@ -847,6 +864,12 @@ def do_transform(filter_string: str = 'BB',
                  color_index: Tuple[str, str] = ('SG', 'SR'),
                  fit_order: int = 1,
                  ri_color_range: Tuple[float, float] = (0, 0.5)):
+    """ Workflow is: photrix workup with the rest of night's images;
+                     rename all Transform...fts to MPnn...fts,
+                     ss.start(...), ss.assess() as usual;
+                     edit session.ini as usual (use star as MP);
+                     ss.make_dfs(), ss.do_transform().
+    """
     # Setup, about the same as for do_session():
     context, defaults_dict, session_dict, _ = _session_setup('do_session')
     this_directory, mp_string, an_string, _ = context
@@ -908,6 +931,7 @@ class TransformModel:
 
         self.dep_var_name = 'InstMag_with_offsets'
         self.mm_fit = None      # placeholder for the fit result [MixedModelFit object].
+        self.mean_instmag = None  # placeholder
         self.transform = None   # placeholder for this fit parameter result [scalar].
         self.extinction = None  # "
         self.vignette = None    # "
@@ -968,6 +992,19 @@ class TransformModel:
             raise SessionSpecificationError('Invalid \'Fit Extinction\' '
                                             'option in session.ini')
 
+        # Handle InstMag slope option:
+        instmag_slope_option = self.transform_dict['fit instmag slope']
+        if instmag_slope_option == True:
+            self.mean_instmag = self.df_used_comps_obs['InstMag'].mean()
+            self.df_used_comps_obs['InstMagSlope'] = \
+                [im - self.mean_instmag for im in self.df_used_comps_obs['InstMag']]
+            fixed_effect_var_list.append('InstMagSlope')
+        elif instmag_slope_option == False:
+            pass
+        else:
+            raise SessionSpecificationError(
+                'Invalid \'Fit InstMag Slope\' option in session.ini')
+
         # Build all other fixed-effect (x) variable lists and dep-var offsets:
         if self.transform_dict['fit vignette']:
             fixed_effect_var_list.append('Vignette')
@@ -1017,6 +1054,8 @@ class TransformModel:
         best_mp_ri_color = self.transform_dict['mp ri color']
         self.df_used_mp_obs['CI'] = best_mp_ri_color
         self.df_used_mp_obs['CI2'] = best_mp_ri_color ** 2
+        self.df_used_mp_obs['InstMagSlope'] = \
+            [im - self.mean_instmag for im in self.df_used_mp_obs['InstMag']]
         raw_predictions = self.mm_fit.predict(self.df_used_mp_obs,
                                               include_random_effect=True)
         dep_var_offset = pd.Series(len(self.df_used_mp_obs) * [0.0],
@@ -1031,6 +1070,8 @@ class TransformModel:
                                 self.df_used_mp_obs['ObsAirmass']
             dep_var_offset += extinction_offset
 
+
+
         # Calculate best MP magnitudes, incl. effect of assumed bogus_cat_mag:
         mp_mags = self.df_used_mp_obs['InstMag'] - dep_var_offset - \
             raw_predictions + bogus_cat_mag
@@ -1043,7 +1084,74 @@ class TransformModel:
         return df_mp_mags
 
 
+def find_good_transform_fovs(ra_hours_min: float = 14, ra_hours_max: float = 18)\
+        -> pd.DataFrame:
+    """ Given a RA range, find FOVs with good sets of stars for determing transforms.
+        Currently arranged for CDK20 + AC4040M kit.
+        Print top 25 FOVs, return a DataFrame.
+        Usage: df = ss.find_good_transform_fovs(16, 20)"""
+    # Set operating parameters:
+    dec_deg_min = +18.0
+    dec_deg_max = +48.0
+    fov_width = 0.7 * 35  # arcminutes
+    fov_height = 0.7 * 35  # arcminutes
+    r_mag_max = 15.25
+    ri_color_min = 0
+    ri_color_max = 0.5
+    min_good_comps = 20
 
+    # Loop through all FOVs
+    fov_dict_list = []
+    last_ra = None
+    n_ra = floor((ra_hours_max - ra_hours_min) * 15 / (fov_width / 60.0))
+    n_dec = floor((dec_deg_max - dec_deg_min) / (fov_width / 60.0))
+    for i_ra in range(n_ra):
+        ra_center_deg = (ra_hours_min * 15.0) + i_ra * (fov_width / 60.0)
+        ra_deg_range = (ra_center_deg - (0.5 * fov_width / 60.0),
+                        ra_center_deg + (0.5 * fov_width / 60.0))
+        if last_ra is not None:
+            if int(ra_center_deg / 10) != int(last_ra / 10):
+                print()
+        last_ra = ra_center_deg
+        print(f"{floor(ra_center_deg)} ", end='', flush=True)
+        for i_dec in range(n_dec):
+            dec_center_deg = dec_deg_min + i_dec * (fov_height / 60.0)
+            dec_deg_range = (dec_center_deg - (0.5 * fov_height / 60.0),
+                             dec_center_deg + (0.5 * fov_height / 60.0))
+            fov_catalog = Refcat2(ra_deg_range, dec_deg_range, quiet=True)
+            fov_catalog.update_epoch(datetime.utcnow().replace(tzinfo=timezone.utc))
+            fov_catalog.select_max_r_mag(15)
+            fov_catalog.select_max_r_uncert(15)
+            fov_catalog.select_sloan_ri_color(0, 0.5)
+            fov_catalog.remove_overlapping()
+            comp_count = len(fov_catalog.df_selected)
+            if comp_count >= min_good_comps:
+                comp_ri_color_list = [(r - i)
+                                      for (r, i) in zip(fov_catalog.df_selected['r'],
+                                                        fov_catalog.df_selected['i'])]
+                stddev_ri_color = pd.Series(comp_ri_color_list).std()
+                fov_dict = {'Ra': ra_center_deg, 'Dec': dec_center_deg,
+                            'Count': comp_count, 'Stddev': stddev_ri_color}
+                fov_dict_list.append(fov_dict)
+
+    df_fovs = pd.DataFrame(fov_dict_list).sort_values(by='Stddev', ascending=False)
+    df_fovs.index = [i for i in range(len(df_fovs))]
+
+    # Print top 25 FOVs:
+    n_top_fovs = min(len(df_fovs), 25)
+    print()
+    print(f'Top {n_top_fovs} FOVS:')
+    for i in range(n_top_fovs):
+        ra_deg = (df_fovs['Ra'])[i]
+        ra_hours = int(ra_deg/15)
+        ra_minutes = round(ra_deg / 15 * 60 - (ra_hours * 60))
+        dec_deg = (df_fovs['Dec'])[i]
+        dec_degrees = int(dec_deg)
+        dec_minutes = round(dec_deg * 60 - dec_degrees * 60)
+        print(f"{ra_hours}h {ra_minutes:02d}  {dec_degrees} {dec_minutes:02d}"
+              f" -> {(df_fovs['Count'])[i]:4d} comps, "
+              f"stddev={(df_fovs['Stddev'])[i]:.3f}")
+    return df_fovs
 
 _____SUPPORT_for_PLOTTING___________________________________________________ = 0
 
@@ -1324,8 +1432,8 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'Omit Images = ',
         'Min Catalog r mag = 11.5',
         'Max Catalog r mag = 16',
-        'Max Catalog dr mmag = 16',
-        'Max Catalog di mmag = 16',
+        'Max Catalog dr mmag = 14',
+        'Max Catalog di mmag = 14',
         'Min Catalog ri color = 0.10',
         'Max Catalog ri color = 0.34',
         '']
@@ -1334,10 +1442,11 @@ def _write_session_ini_stub(this_directory, filenames_temporal_order):
         'MP ri color = +0.220',
         'MP ri color origin = Default MP color',
         '# Fit Transform, one of: Fit=1, Fit=2, Use [val1], Use [val1] [val2]:',
-        '# Clear:\'Use +0.39 -0.71\'    BB:\'Use -0.121\'',
+        '# GG495:\'Use -0.135\'',
         'Fit Transform = Use -0.135',
         '# Fit Extinction, one of: Yes, Use [val]:',
         'Fit Extinction = Use +0.13',
+        'Fit InstMag Slope = Yes',
         'Fit Vignette = Yes',
         'Fit XY = No',
         'Fit JD = No']

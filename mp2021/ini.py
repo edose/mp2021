@@ -155,6 +155,7 @@ def make_session_dict(defaults_dict, session_directory):
         'fit transform': ('use', '+0.4', '-0.16'), or
             ('use', '+0.4'), ('fit', '1'), ('fit', '2').
         'fit extinction': (use', '+0.16'), or 'yes' to fit extinction.
+        'fit instmag slope': True,
         'fit vignette': True,
         'fit xy': False,
         'fit jd': True }

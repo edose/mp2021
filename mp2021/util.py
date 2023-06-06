@@ -22,7 +22,7 @@ LATEST_APPLICABLE_AN = 21000000
 VALID_FITS_FILE_EXTENSIONS = ('.fits', '.fit', '.fts')
 
 SOURCE_RADIUS_IN_FWHM = 1.8
-AP_GAP_IN_FWHM = 1.0
+AP_GAP_IN_FWHM = 0.75
 BACKGROUND_WIDTH_IN_FWHM = 1.2
 
 CURRENT_MPFILE_VERSION = '1.1'
@@ -140,7 +140,7 @@ def fits_is_calibrated(hdu):
     def _is_calibrated_by_maxim_5_or_6(hdu):
         calibration_value = fits_header_value(hdu, 'CALSTAT')
         if calibration_value is not None:
-            if calibration_value.strip().upper() == 'BDF':
+            if calibration_value.strip().upper() in ('BDF', 'DF'):
                 return True
         return False
 

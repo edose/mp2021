@@ -21,6 +21,7 @@ MP ri Color    = float -> mp ri color
 MP ri Color Origin = string -> mp ri color origin
 Fit Transform  = string -> fit transform
 Fit Extinction = string -> fit extinction
+Fit InstMag Slope = boolean -> fit instmag slope
 Fit Vignette   = boolean -> fit vignette
 Fit XY         = boolean -> fit xy
 Fit JD         = boolean -> fit jd

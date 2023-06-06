@@ -20,11 +20,13 @@ import matplotlib.pyplot as plt
 # Author's packages:
 import astropak.util
 from astropak.stats import MixedModelFit
+from astropak.catalogs import Refcat2
 import mp2021.util as util
 import mp2021.ini as ini
 import mp2021.common as common
 from mp2021.session import make_qq_plot_fullpage, make_9_subplot, draw_x_line, \
     make_comp_variability_plots
+
 
 THIS_PACKAGE_ROOT_DIRECTORY = \
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
